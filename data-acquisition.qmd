@@ -35,6 +35,176 @@ base_req <-
 
 ```
 
+
+I wonder if I can "quickly" rescrape the olympic results
+
+```{r}
+library(rvest)
+
+# first, I need to get the competition ID's, which I did manually
+
+competition_ids <- c(7153115, 7132391, 7093747, 6999193, 6977748, 6913163, 6951910, 6961749)
+
+scrape_results <- function(competition_id, event_day) {
+  Sys.sleep(0.5)
+  base_req %>%
+  req_body_json(
+    list(
+    operationName = "getCalendarCompetitionResults",
+    variables = list(
+      competitionId = competition_id,
+      day = event_day,
+      eventId = NULL
+    ),
+    query = "
+      query getCalendarCompetitionResults($competitionId: Int, $day: Int, $eventId: Int) {
+        getCalendarCompetitionResults(competitionId: $competitionId, day: $day, eventId: $eventId) {
+          competition {
+            dateRange
+            endDate
+            name
+            rankingCategory
+            startDate
+            venue
+          }
+          eventTitles {
+            eventTitle
+            events {
+              event
+              eventId
+              gender
+              isRelay
+              perResultWind
+              withWind
+              races {
+                date
+                day
+                race
+                raceId
+                raceNumber
+                results {
+                  competitor {
+                    teamMembers {
+                      id
+                      name
+                      iaafId
+                      urlSlug
+                    }
+                    id
+                    name
+                    iaafId
+                    urlSlug
+                    birthDate
+                    hasProfile
+                  }
+                  mark
+                  nationality
+                  place
+                  points
+                  qualified
+                  records
+                  wind
+                  remark
+                  details {
+                    event
+                    eventId
+                    raceNumber
+                    mark
+                    wind
+                    placeInRound
+                    placeInRace
+                    points
+                    overallPoints
+                    placeInRoundByPoints
+                    overallPlaceByPoints
+                  }
+                }
+                startList {
+                  competitor {
+                    birthDate
+                    country
+                    id
+                    name
+                    urlSlug
+                  }
+                  order
+                  pb
+                  sb
+                  bib
+                }
+              }
+            }
+          }
+        }
+      }
+    "
+  )
+) %>% 
+  req_perform() %>% 
+  resp_body_json()
+}
+
+all_data <- tibble()
+
+for(competition_id in competition_ids) {
+
+event_days <-   
+  base_req %>%
+  req_body_json(
+    list(
+    operationName = "getCalendarCompetitionResults",
+    variables = list(
+      competitionId = competition_id,
+      day = NULL,
+      eventId = NULL
+    ),
+        query = "
+      query getCalendarCompetitionResults($competitionId: Int, $day: Int, $eventId: Int) {
+        getCalendarCompetitionResults(competitionId: $competitionId, day: $day, eventId: $eventId) {
+          options {
+            days {
+              date
+              day
+            }
+          }
+        }
+      }
+      "
+    )
+    )%>% 
+  req_perform() %>%
+  resp_body_json() %>% 
+  pluck("data", "getCalendarCompetitionResults", "options", "days") %>% 
+  bind_rows() %>% 
+  pull(day)
+
+ results <- map(event_days, ~ scrape_results(competition_id, .x)) %>% 
+   bind_rows() %>% 
+  unnest_wider(data) %>% 
+  unnest_wider(getCalendarCompetitionResults) %>%
+  unnest_wider(competition) %>% 
+  unnest_longer(eventTitles) %>% 
+  unnest_wider(eventTitles) %>% 
+  unnest_longer(events) %>% 
+  unnest_wider(events) %>% 
+  unnest_longer(races) %>% 
+  unnest_wider(races) %>% 
+  unnest_longer(results) %>% 
+  unnest_wider(results) %>% 
+  rename(event_name = name) %>% 
+  unnest_wider(competitor) %>% 
+  unnest_longer(teamMembers, keep_empty = T) %>% 
+  unnest_wider(teamMembers, names_sep = "_") 
+ 
+ all_data <- bind_rows(all_data, bind_rows(results))
+
+}
+
+write_csv(all_data, "olympics_data.csv")
+
+```
+
+
 ```{r}
 
 get_results_data <- function(athlete_id, year) {
@@ -144,4 +314,3 @@ for (athlete_link in athlete_links) {
 write_csv(all_results, "athlete_results_data.csv")
 
 ```
-
