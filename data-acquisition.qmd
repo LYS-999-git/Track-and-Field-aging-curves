@@ -35,7 +35,6 @@ base_req <-
 
 ```
 
-
 I wonder if I can "quickly" rescrape the olympic results
 
 ```{r}
@@ -181,7 +180,7 @@ event_days <-
  results <- map(event_days, ~ scrape_results(competition_id, .x)) %>% 
    bind_rows() %>% 
   unnest_wider(data) %>% 
-  unnest_wider(getCalendarCompetitionResults) %>%
+  #unnest_wider(getCalendarCompetitionResults) %>%
   unnest_wider(competition) %>% 
   unnest_longer(eventTitles) %>% 
   unnest_wider(eventTitles) %>% 
@@ -200,10 +199,11 @@ event_days <-
 
 }
 
+all_data <- all_data %>% janitor::clean_names()
+
 write_csv(all_data, "olympics_data.csv")
 
 ```
-
 
 ```{r}
 
@@ -267,13 +267,19 @@ so for each distinct athlete in `olympics_data.csv` dataset
 # all athletes who have made an olympic games between 1996 and 2021. 
 # We could probably add the 2024 olympics to this if we want, which would be a good idea.
 
-athlete_links <- read_csv("https://raw.githubusercontent.com/awosoga/peaks-and-primes/refs/heads/master/olympics_data.csv") %>% 
-  distinct(athlete_links) %>% 
-  pull(athlete_links)
+athlete_links <- read_csv("olympics_data.csv", show_col_types = F) %>% 
+  distinct(url_slug) %>% 
+  pull(url_slug)
 
-all_results <- tibble()
-for (athlete_link in athlete_links) {
-  Sys.sleep(0.5)
+#all_results <- tibble()
+for (athlete_link in sample(athlete_links)) {
+  # add a progress bar
+  if(athlete_link %in% unique(all_results$athlete_link)) next
+  
+  if(n_distinct(all_results$athlete_link) %% 500 == 0 ) {
+    cat(paste0("Processed ", n_distinct(all_results$athlete_link), " out of ", length(athlete_links), " athletes\n"))
+  }
+
   athlete_id <- str_extract(athlete_link, "\\d+$")
   
   active_years <- 
@@ -290,9 +296,13 @@ for (athlete_link in athlete_links) {
   )) %>% 
   req_perform() %>% 
   resp_body_json() %>% 
-  pluck("data", "getSingleCompetitorResultsDate", "activeYears") %>% 
-  list_c() %>% 
-  parse_integer()
+  pluck("data", "getSingleCompetitorResultsDate", "activeYears")
+  
+  if (is.null(active_years)) next
+  
+  Sys.sleep(0.5)
+  
+  active_years <- active_years %>% list_c() %>% parse_integer()
   
   results <- map(active_years, ~ get_results_data(athlete_id, .x))
 
