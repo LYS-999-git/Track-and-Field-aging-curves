@@ -271,7 +271,7 @@ athlete_links <- read_csv("olympics_data.csv", show_col_types = F) %>%
   distinct(url_slug) %>% 
   pull(url_slug)
 
-#all_results <- tibble()
+all_results <- tibble()
 for (athlete_link in sample(athlete_links)) {
   # add a progress bar
   if(athlete_link %in% unique(all_results$athlete_link)) next
@@ -314,7 +314,7 @@ for (athlete_link in sample(athlete_links)) {
     unnest_wider(resultsByDate) %>% 
     unnest_wider(parameters) %>% 
     janitor::clean_names() %>% 
-    mutate(ahlete_id = athlete_id, 
+    mutate(athlete_id = athlete_id, 
            athlete_link = athlete_link)
   
   all_results <- bind_rows(all_results, results_df)
