@@ -1,0 +1,1256 @@
+---
+title: "Clean Full dataset"
+output: html_document
+date: "2025-11-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(readr)
+library(ggplot2)
+library(refund)
+library(face)
+library(fda)
+library(purrr)
+library(tidyr)
+library(stringr)
+```
+
+```{r}
+full_data <- read.csv("~/Desktop/Stat 468 final project/data/track and field data/data.csv")
+full_olympic <- read.csv("~/Desktop/Stat 468 final project/data/track and field data/olympic_results (1).csv")
+
+```
+
+```{r}
+raw_json <- read_json("~/Desktop/Stat 468 final project/data/track and field data/iaaf-2025.json", simplifyVector = FALSE)
+
+# Convert list of lists to a flat tibble
+iaaf_table <- tibble::tibble(
+  gender = sapply(raw_json, `[[`, "gender"),
+  event = sapply(raw_json, `[[`, "event"),
+  mark = sapply(raw_json, `[[`, "mark"),
+  points = sapply(raw_json, `[[`, "points")
+)
+```
+
+
+```{r}
+Olympics_data <- full_olympic %>%
+  janitor::clean_names() %>% 
+  separate_wider_delim(
+    cols   = event,
+    names  = c("gender_from_event", "event"),
+    delim  = " ",
+    too_many = "merge"
+  ) %>%
+  filter(str_detect(event, "Wheelchair", negate = TRUE)) %>% 
+  mutate(
+    # fix Aminata CAMARA's birth date
+    birth_date = if_else(name == "Aminata CAMARA", "06 DEC 1973", birth_date),
+    birth_date = as.Date(birth_date, format = "%d %b %Y"),
+    age        = year(end_date) - year(birth_date),
+    games = factor(
+      event_name,
+      ordered = TRUE,
+      levels = c("The XXXIII Olympic Games","The XXXII Olympic Games",
+                 "The XXXI Olympic Games","The XXX Olympic Games",
+                 "The XXIX Olympic Games","The XXVIII Olympic Games",
+                 "The XXVII Olympic Games","The XXVI Olympic Games"),
+      labels = c("Paris 24","Tokyo '20","Rio '16","London '12",
+                 "Beijing '08","Athens '04","Sydney '00","Atlanta '96")
+    ),
+    event_type = case_match(
+      event,
+      c("100 Metres","200 Metres","400 Metres","400 Metres Hurdles",
+        "100 Metres Hurdles","110 Metres Hurdles") ~ "Sprints",
+      c("800 Metres","1500 Metres","3000 Metres Steeplechase") ~ "Middle Distance",
+      c("5000 Metres","10,000 Metres") ~ "Long Distance",
+      c("Heptathlon","Decathlon") ~ "Combined Events",
+      c("High Jump","Long Jump","Triple Jump","Pole Vault") ~ "Jumps",
+      c("Shot Put","Discus Throw","Hammer Throw",
+        "Javelin Throw","Javelin Throw (old)") ~ "Throws",
+      c("10 Kilometres Race Walk","20 Kilometres Race Walk",
+        "50 Kilometres Race Walk","Marathon") ~ "Road Races",
+      .default = "Other"
+    ),
+    event_category = if_else(
+      str_detect(event, "Metres|Walk|Wheelchair") | event %in% c("Marathon"),
+      "Track", "Field"
+    )
+  ) %>%
+  mutate(
+    event      = if_else(event == "Javelin Throw (old)", "Javelin Throw", event),
+    games_year = year(end_date),
+    gender = if_else(gender == "M", "men", "women")
+  ) %>% 
+  dplyr::select(url_slug,birth_date,gender, event_category, event) %>%
+  distinct(url_slug,event, .keep_all = TRUE)
+  # group_by(url_slug) %>%
+  # summarise(event,
+  #   birth_date = first(birth_date),
+  #   gender = first(gender),
+  #   event_category = first(event_category),
+  #   .groups = "drop"
+  
+olympic_events <- Olympics_data %>% distinct(event)
+#keep only rows in full_data_new whose discipline appears in Olympic_data
+full_data_kept <- full_data_new %>%
+  semi_join(olympic_events, by = c("discipline" = "event"))
+
+
+```
+
+```{r}
+
+full_data_new <- full_data %>% dplyr::select(date,results_by_year,competition,discipline,mark,result_score,athlete_id,athlete_link)
+```
+
+
+```{r}
+# join full dataset with full Olympic data
+data_new_with_birthdate <- full_data_kept %>%
+  inner_join(
+    Olympics_data,
+    by = c("athlete_link" = "url_slug", "discipline" = "event")
+  ) %>% 
+  filter(!mark %in% c("DNF","DNS","DQ","NM","-","NT", "NH", "BLJ", "VST", "EXH"), !is.na(mark)) |> 
+  mutate(
+    age = results_by_year - year(birth_date),
+    
+    # keep original string mark
+    mark_raw = mark,
+    
+    # convert track marks to seconds; field marks to numeric distance
+    mark = if_else(
+      event_category == "Track",
+      as.numeric(
+        difftime(
+          lubridate::parse_date_time2(
+            mark_raw,
+            orders = c("%H:%M:%S", "%M:%S:00", "%M:%OS", "%OS"),
+            exact  = TRUE
+          ),
+          lubridate::parse_date_time2("0", orders = "S"),
+          units = "secs"
+        )
+      ),
+      parse_number(mark_raw)
+    ),
+    
+    # for cases lubridate couldn't parse (e.g., weird formats),
+    # fall back to parse_number()
+    mark = if_else(is.na(mark), parse_number(mark_raw), mark)
+  ) %>%
+  dplyr::select(-mark_raw) 
+```
+
+```{r}
+# tidy dataset for FPCA
+# keep only 25 events
+disciplines_to_keep <- c(
+  "100 Metres",
+  "200 Metres",
+  "400 Metres",
+  "800 Metres",
+  "4x100 Metres Relay",
+  "4x400 Metres Relay",
+  "Race Walk Mixed Relay",
+  "1500 Metres",
+  "5000 Metres",
+  "10,000 Metres",
+  "Marathon",
+  "Triple Jump",
+  "Long Jump",
+  "High Jump",
+  "Shot Put",
+  "Discus Throw",
+  "Hammer Throw",
+  "Javelin Throw",
+  "Decathlon",
+  "Heptathlon",
+  "Pole Vault",
+  "10 Kilometres Race Walk",
+  "50 Kilometres Race Walk",
+  "20 Kilometres Race Walk",
+  "100 Metres Hurdles",
+  "110 Metres Hurdles",
+  "400 Metres Hurdles",
+  "3000 Metres Steeplechase")
+# tidy dataset for FPCA called "fd_data_full"
+fd_data_full <- data_new_with_birthdate |> 
+  filter(discipline %in% disciplines_to_keep) |> 
+  filter(!is.na(age),
+    !is.na(result_score),
+    age != 0,
+    result_score != 0) |> 
+  mutate(id = paste(athlete_link,discipline)) |> 
+  dplyr::select(id, age, result_score, gender) 
+  
+```
+
+```{r}
+# plot for EDA, age distribution
+
+library(ggplot2)
+# ensure gender exists and is clean
+fd_plot <- fd_data_full |>
+  dplyr::filter(!is.na(gender), !is.na(age)) |>
+  dplyr::mutate(gender = factor(gender, levels = c("men","women")))
+
+p <- ggplot(fd_plot, aes(x = age, fill = gender, color = gender)) +
+  geom_density(
+    aes(y = after_stat(density)),
+    adjust = 1.6,
+    alpha = 0.30,      # translucent fills for overlap
+    linewidth = 1.1
+  ) +
+  scale_fill_manual(values = c(men = "#5DA5DA", women = "#F17CB0")) +
+  scale_color_manual(values = c(men = "#1B6F9C", women = "#C2185B")) +
+  scale_x_continuous(breaks = seq(16, 45, by = 2)) +
+  coord_cartesian(xlim = c(16, 40)) +
+  labs(
+    title = "Distribution of Performance Age by Gender",
+    x = "Performance age (years)",
+    y = "Density",
+    fill = "Gender", color = "Gender"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "top",
+        plot.title = element_text(hjust = 0.5))
+
+ggsave("jqas1.png", plot = p, width = 6, height = 4, units = "in")
+
+
+############### plot 2, raw aging curves#######################################
+library(dplyr)
+library(ggplot2)
+int_breaks_max <- function(k = 4) function(x) {
+  lo <- floor(min(x, na.rm = TRUE))
+  hi <- ceiling(max(x, na.rm = TRUE))
+  step <- max(1, ceiling((hi - lo) / k))   # choose 1, 2, 3, ...
+  seq(lo, hi, by = step)
+}
+# mark peak per athlete–event (panel)
+# Find candidates with at least 3 observations (so lines are meaningful)
+candidates <- fd_data_full %>%
+  group_by(id) %>%
+  summarise(n = n(),
+            age_range = max(age, na.rm=TRUE) - min(age, na.rm=TRUE)) %>%
+  arrange(desc(n))
+
+# pick ~15 varied ones (you can replace these IDs manually)
+set.seed(1)
+sample_ids <- c(
+  sample(candidates$id[candidates$n <= 4], 3),   # short careers
+  sample(candidates$id[candidates$age_range > 15], 3),  # long careers
+  sample(candidates$id[candidates$n > 6], 6)     # general good density
+)
+
+
+fd_sample <- fd_data_full %>%
+  filter(id %in% sample_ids) %>%
+  group_by(id) %>%
+  arrange(age, .by_group = TRUE) %>%
+  mutate(is_peak = result_score == max(result_score, na.rm = TRUE)) %>%
+  ungroup()
+
+p <- ggplot(fd_sample, aes(x = age, y = result_score, group = id)) +
+  geom_line(linewidth = 0.8, alpha = 0.9, color = "grey25") +   # keep as requested
+  geom_point(size = 1.6, alpha = 0.9, color = "blue") +       # all points
+  geom_point(
+    data = dplyr::filter(fd_sample, is_peak),
+    color = "#E74C3C", size = 2.6
+  ) +
+  facet_wrap(~ id, scales = "free_x", ncol = 4) +
+  scale_x_continuous(
+    breaks = int_breaks_max(4),  # <= 4 ticks per panel
+    minor_breaks = NULL,
+    expand = expansion(mult = c(0.02, 0.02))
+  ) +
+  theme(axis.text.x = element_text(size = 8)) +
+  guides(x = guide_axis(n.dodge = 2, check.overlap = TRUE)) +
+  labs(
+    title = "Sample Athlete–Event Performance Trajectories",
+    x = "Performance age (years)",
+    y = "World Athletics points"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 9),
+    plot.title  = element_text(hjust = 0.5)
+  )
+
+ggsave("jqas2.png", plot = p, width = 6, height = 4, units = "in")
+
+
+```
+
+```{r}
+# # convert mark to iaaf points and join with data_new_with_birthdate
+# fulldata_iaaf <- data_new_with_birthdate |> 
+#   mutate(
+#     discipline = case_when(
+#       discipline == "100 Metres" ~ "100m",
+#       discipline == "200 Metres" ~ "200m",
+#       discipline == "400 Metres" ~ "400m",
+#       discipline == "800 Metres" ~ "800m",
+#       discipline == "800 Metres Short Track" ~ "800m sh",
+#       discipline == "1500 Metres" ~ "1500m",
+#       discipline == "5000 Metres" ~ "5000m",
+#       discipline == "10,000 Metres" ~ "10000m",
+#       discipline == "Marathon" ~ "Road Marathon",
+#       discipline == "Triple Jump" ~ "TJ",
+#       discipline == "Long Jump" ~ "LJ",
+#       discipline == "High Jump" ~ "HJ",
+#       discipline == "Shot Put" ~ "SP",
+#       discipline == "Discus Throw" ~ "DT",
+#       discipline == "Hammer Throw" ~ "HT",
+#       discipline == "Javelin Throw" ~ "JT",
+#       discipline == "Decathlon" ~ "Dec.",
+#       discipline == "Heptathlon" ~ "Hept.",
+#       discipline == "Pole Vault" ~ "PV",
+#       discipline == "10 Kilometres Race Walk" ~ "10,000mW",
+#       discipline == "50 Kilometres Race Walk" ~ "50,000mW",
+#       discipline == "20 Kilometres Race Walk" ~ "20,000mW",
+#       discipline == "100 Metres Hurdles" ~ "100mH",
+#       discipline == "110 Metres Hurdles" ~ "110mH",
+#       discipline == "400 Metres Hurdles" ~ "400mH",
+#       discipline == "3000 Metres Steeplechase" ~ "3000m SC",
+#       TRUE ~ discipline
+#     )
+#   )
+```
+
+
+```{r}
+#FPCA method's aging curve (for a event type)
+
+#keep only 100m athletes
+fd_100m <- fd_data_full |> 
+  filter(grepl(" 100 Metres$", id))
+# Choose 50 100m athletes for FPCA
+set.seed(468)
+ids_sub <- fd_100m %>%
+  count(id, sort = TRUE) %>%
+  slice_head(n = 50) %>%        
+  pull(id)
+
+face_input_100m <- fd_100m %>%
+  filter(id %in% ids_sub) %>%
+  transmute(
+    y       = result_score,
+    argvals = age,
+    subj    = id
+  )
+
+# Age grid for prediction 
+age_grid <- seq(18, 34, by = 1)
+
+fit_face <- face.sparse(face_input_100m, argvals.new = age_grid)
+# randomly choose one athlete from the 50 and plot
+set.seed(123)                            
+sample_id <- sample(ids_sub, size = 1)
+sample_id
+
+dati <- face_input_100m %>%
+  filter(subj == sample_id) %>%
+  arrange(argvals)
+k <- length(age_grid)
+
+# build prediction data for this athlete
+dati_pred <- data.frame(
+  y       = c(dati$y, rep(NA, k)),
+  argvals = c(dati$argvals, age_grid),
+  subj    = rep(dati$subj[1], nrow(dati) + k)
+)
+
+yhat <- predict(fit_face, dati_pred)
+
+Ord <- (nrow(dati) + 1):(nrow(dati) + k)
+
+# plot: raw points, individual FPCA curve, 95% CI, 100m mean
+plot(dati$argvals, dati$y,
+     xlab = "Performance Age (years)",
+     ylab = "IAAF score",
+     pch  = 19, col = "blue",
+     xlim = range(age_grid),
+     ylim = range(c(dati$y, yhat$y.pred[Ord]), na.rm = TRUE),
+     bty  = "n")
+
+lines(age_grid, yhat$y.pred[Ord], col = "red",  lwd = 2)
+lines(age_grid, yhat$y.pred[Ord] + 1.96 * yhat$se.pred[Ord], col = "red", lty = 2)
+lines(age_grid, yhat$y.pred[Ord] - 1.96 * yhat$se.pred[Ord], col = "red", lty = 2)
+lines(age_grid, fit_face$mu.new, col = "black", lwd = 2)
+
+#add legend
+legend("topright",
+       legend = c("Individual FPCA curve",
+                  "95% prediction band",
+                  "100m mean curve(50 athlete subset)"),
+       col    = c("red", "red", "black"),
+       lty    = c(1, 2, 1),
+       lwd    = c(2, 1, 2),
+       bty    = "n",
+       cex    = 0.8,      # shrink legend text
+       inset  = 0.02)
+
+title(main = paste("Aging curve for", sample_id))
+
+```
+
+
+
+
+```{r}
+#imFunPCA method's aging curve
+library(dplyr)
+library(fda)
+
+# Men's 100m, one value per age per athlete
+fd_100m_men_mean <- fd_100m %>%
+  filter(gender == "men") %>%
+  group_by(id, age) %>%
+  summarise(result_score = mean(result_score), .groups = "drop") %>%
+  arrange(id, age)
+ids <- unique(fd_100m_men_mean$id)
+
+############ build athlete specific right-censoring lists
+grid_start <- max(1, floor(min(fd_100m_men_mean$age, na.rm=TRUE))) #14
+grid_end   <- ceiling(max(fd_100m_men_mean$age, na.rm=TRUE))       # 50 
+grid_step  <- 1                                        
+
+make_lists <- function(di) {
+  di <- arrange(di, age)
+  ages_obs   <- di$age
+  scores_obs <- di$result_score
+  t_last     <- max(ages_obs)
+  c_last     <- scores_obs[which.max(ages_obs)]
+
+  # censored tail ages after the athlete's last observed age
+  ages_censor  <- if (t_last < grid_end) seq(t_last + grid_step, grid_end, by = grid_step) 
+                 else numeric(0)
+
+  list(
+    timepoints = c(ages_obs, ages_censor),
+    observed   = c(scores_obs, rep(c_last, length(ages_censor))),
+    delta      = c(rep(0, length(ages_obs)), rep(1, length(ages_censor))),
+    t_last     = t_last,
+    c_last     = c_last
+  )
+}
+
+lst <- lapply(ids, function(z) make_lists(filter(fd_100m_men_mean, id == z)))
+timepoints <- lapply(lst, `[[`, "timepoints")
+observed   <- lapply(lst, `[[`, "observed")
+delta      <- lapply(lst, `[[`, "delta")
+t_last_vec <- sapply(lst, `[[`, "t_last")
+c_last_vec <- sapply(lst, `[[`, "c_last")
+
+##########################################################################################
+
+# basis + fit mean
+K <- 6
+spline_basis <- create.bspline.basis(rangeval = c(grid_start, grid_end), nbasis = K, norder = 4)
+
+meanfit <- findmean(
+  observed   = observed,
+  timepoints = timepoints,
+  delta      = delta,
+  minit      = K,
+  threshold  = 1e-5
+)
+
+#center, then PC1 and PC2
+observed_center <- lapply(seq_along(observed), function(i) {
+  (observed[[i]] - eval.fd(timepoints[[i]], meanfit$pc_fit))[, 1]
+})
+
+pc1s <- first_FPC(rnorm(K), observed_center, timepoints, delta, threshold = 1e-3)
+
+previous_beta <- list(pc1s$beta)
+# pc2
+pc2s <- third_FPC_conditional(rnorm(K), 2, observed_center, timepoints, delta,
+                              betalist = previous_beta, threshold = 1e-3)
+# #PC 3
+# prev <- list(pc1s$beta, pc2s$beta)
+# pc3s <- third_FPC_conditional(rnorm(K), 3, observed_center, timepoints, delta,
+#                               betalist = prev, threshold = 1e-2, maxit = 20)
+# #PC 4
+# prev <- list(pc1s$beta, pc2s$beta, pc3s$beta)
+# pc4s <- third_FPC_conditional(rnorm(K), 4, observed_center, timepoints, delta,
+#                               betalist = prev, threshold = 1e-2)
+```
+
+```{r}
+#number of pcs, how much variance explained by pc
+eig <- c(var(pc1s$sfit), var(pc2s$sfit))           # add var(pc3s$sfit) if you fit PC3
+evr <- cumsum(eig) / sum(eig)                      # explained-variance ratio
+data.frame(PC = seq_along(eig), Eigen = eig, EVR = evr)
+
+```
+
+```{r}
+#number of pcs, RMSE
+rmse_m <- function(m){
+  errs <- numeric(length(timepoints))
+  for(i in seq_along(timepoints)){
+    ti <- timepoints[[i]][delta[[i]] == 0]
+    yi <- observed[[i]][delta[[i]] == 0]
+    if (length(ti) == 0) { errs[i] <- NA; next }
+
+    pred <- eval.fd(ti, meanfit$pc_fit)
+    if (m >= 1) pred <- pred + pc1s$sfit[i] * eval.fd(ti, pc1s$pc_fit)
+    if (m >= 2) pred <- pred + pc2s$sfit[i] * eval.fd(ti, pc2s$pc_fit)
+    # if (m >= 3) pred <- pred + pc3s$sfit[i] * eval.fd(ti, pc3s$pc_fit)
+
+    errs[i] <- sqrt(mean((yi - pred)^2))
+  }
+  mean(errs, na.rm=TRUE)
+}
+
+rmse_vals <- sapply(0:2, rmse_m)  
+rmse_vals
+```
+
+```{r}
+# plot aging curve using imFunPCA, 2 pcs
+tt   <- seq(grid_start, grid_end, by = 1)
+mu   <- eval.fd(tt, meanfit$pc_fit)
+phi1 <- eval.fd(tt, pc1s$pc_fit)
+phi2 <- eval.fd(tt, pc2s$pc_fit)
+# phi3 <- eval.fd(tt, pc3s$pc_fit)
+
+# score1 <- pc1s$sfit
+# score2 <- pc2s$sfit   # if no subjects got dropped; otherwise do the align_scores trick
+###fix different numbers of pcs#####
+n <- length(ids)
+
+# how many *observed* (uncensored) ages each athlete has
+obs_counts <- sapply(delta, function(z) sum(1 - z))
+
+# subjects kept inside third_FPC_conditional for pc_index = 2:
+keep_idx_m <- function(m) which(obs_counts > m)
+keep2 <- keep_idx_m(2)
+
+# pc2s$sfit is a matrix: [#kept subjects] x [#PCs so far]
+#dim(pc2s$sfit)    
+
+#last_col <- ncol(pc2s$sfit) 
+
+score1 <- numeric(n)
+score2 <- numeric(n)
+score1[keep2] <- pc2s$sfit[, 1]   # PC1 scores (updated)
+score2[keep2] <- pc2s$sfit[, 2]   
+
+
+predict_one <- function(i, M = 2, clamp_nonneg = TRUE, cap_after_last = FALSE) {
+  yhat <- as.numeric(mu +
+                     score1[i] * phi1 +
+                     (M >= 2) * score2[i] * phi2)
+
+  if (clamp_nonneg)   yhat <- pmax(0, yhat)
+  if (cap_after_last) yhat <- ifelse(tt > t_last_vec[i], pmin(yhat, c_last_vec[i]), yhat)
+
+  data.frame(id = ids[i], t = tt, yhat = yhat)
+}
+
+predict_curve <- do.call(rbind, lapply(seq_along(ids), predict_one, M = 2))
+###################################################################
+# Build observed data frame (only uncensored points)
+obs_df <- do.call(rbind, lapply(seq_along(ids), function(i) {
+  keep <- delta[[i]] == 0          # uncensored ages only
+  data.frame(
+    id   = ids[i],
+    age  = timepoints[[i]][keep],
+    y    = observed[[i]][keep]
+  )
+}))
+
+#Plot for Usain bolt
+meanWCS_points_by_gender <- c(
+  men   = 1147.174,
+  women = 1126.130
+)
+example_id <- "jamaica/usain-bolt-014201847 100 Metres"
+   
+
+p <- ggplot() +
+  geom_line(
+    data = filter(predict_curve, id == example_id),
+    aes(x = t, y = yhat),
+    linewidth = 1
+  ) +
+  geom_point(
+    data = filter(obs_df, id == example_id),
+    aes(x = age, y = y),
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = meanWCS_points_by_gender["men"],   # world-class standard
+    linetype   = "dashed",
+    color      = "red"
+  ) +
+  labs(
+    x = "Performance age (years)",
+    y = "World Athletic points",
+    title = paste("imFunPCA aging curve for Usain Bolt"),
+    subtitle = "Dashed line: world-class standard for men (≈1147 World Athletic points)"
+  ) +
+  theme_minimal(base_size = 12)
+ggsave("Usain Bolt.png", plot = p, width = 6, height = 4, units = "in")
+# plot for kim collins
+example_id <- "saint-kitts-and-nevis/kim-collins-014224942 100 Metres"
+   
+
+p <- ggplot() +
+  geom_line(
+    data = filter(predict_curve, id == example_id),
+    aes(x = t, y = yhat),
+    linewidth = 1
+  ) +
+  geom_point(
+    data = filter(obs_df, id == example_id),
+    aes(x = age, y = y),
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = meanWCS_points_by_gender["men"],   # world-class standard
+    linetype   = "dashed",
+    color      = "red"
+  ) +
+  labs(
+    x = "Performance age (years)",
+    y = "World Athletic points",
+    title = paste("imFunPCA aging curve for Kim Collins"),
+    subtitle = "Dashed line: world-class standard for men (≈1147 World Athletic points)"
+  ) +
+  theme_minimal(base_size = 12)
+ggsave("Kim Collins.png", plot = p, width = 6, height = 4, units = "in")
+```
+
+
+```{r}
+#number of clusters(k-means)
+
+# Reconstructed curves on common grid
+timegrid <- seq(grid_start, grid_end, by = 1)    
+
+mu_fd  <- meanfit$pc_fit
+pc1_fd <- pc1s$pc_fit
+pc2_fd <- pc2s$pc_fit
+
+mu_t <- as.numeric(eval.fd(timegrid, mu_fd))   # mean curve on grid 
+
+Phi <- cbind(
+  as.numeric(eval.fd(timegrid, pc1_fd)),
+  as.numeric(eval.fd(timegrid, pc2_fd))
+)                                                # (T x 2)
+
+# restrict clustering to athletes that have scores for PC2
+idx_clust <- keep2
+ids_clust <- ids[idx_clust]
+
+Alpha <- cbind(score1[idx_clust], score2[idx_clust])  # (n_clust x 2) scores
+Alpha <- as.matrix(Alpha)
+
+mu_mat   <- matrix(mu_t, nrow = nrow(Alpha), ncol = length(mu_t), byrow = TRUE)
+Pred_mat <- Alpha %*% t(Phi) + mu_mat                 # (n_clust x T), smooth curves
+Pred_mat <- as.matrix(Pred_mat)
+
+# Actual within-cluster SSE vs K
+
+
+Kmax <- 8 
+
+actual_sse <- sapply(1:Kmax, function(k) {
+  km <- kmeans(Pred_mat, centers = k, nstart = 20, iter.max = 200)
+  km$tot.withinss / ncol(Pred_mat)     # mean SSE per time point
+})
+
+# Permutation baseline (shuffle scores)
+
+
+set.seed(468)
+n_perm <- 25
+perm_sse_mat <- matrix(NA_real_, nrow = n_perm, ncol = Kmax)
+
+for (b in 1:n_perm) {
+  # shuffle each PC score column independently
+  perm_alpha <- apply(Alpha, 2, sample)
+  
+  # reconstruct permuted curves
+  perm_data <- perm_alpha %*% t(Phi) + mu_mat
+  
+  # K-means on permuted curves
+  perm_sse_mat[b, ] <- sapply(1:Kmax, function(k) {
+    tryCatch(
+      kmeans(perm_data, centers = k, nstart = 10, iter.max = 100)$tot.withinss /
+        ncol(perm_data),
+      error = function(e) NA_real_
+    )
+  })
+}
+
+# Figure: actual vs random SSE
+actual_sse_log    <- log(actual_sse)        
+perm_sse_mat_log  <- log(perm_sse_mat) 
+
+y_range <- range(c(as.vector(perm_sse_mat_log), actual_sse_log), na.rm = TRUE)
+
+# matplot(1:Kmax, t(perm_sse_mat_log), type = "l", lty = 1,
+#         col  = adjustcolor("red", alpha.f = 0.25),
+#         ylim = y_range,
+#         xlab = "Number of clusters (K)",
+#         ylab = "Mean within-cluster SSE per timepoint",
+#         main = "Actual Within Group SSE vs Random Within Group SSE")
+# 
+# lines(1:Kmax, actual_sse_log, col = "blue", lwd = 3)
+# 
+# legend("topright",
+#        legend = c("Actual data", "Permuted scores"),
+#        col    = c("blue", adjustcolor("red", 0.6)),
+#        lty    = 1, lwd = c(3, 1), bty = "n")
+###
+png("sse_actual_vs_permuted.png", width = 6, height = 4, units = "in", res = 300)
+matplot(1:Kmax, t(perm_sse_mat_log), type = "l", lty = 1,
+        col  = adjustcolor("red", alpha.f = 0.25),
+        ylim = y_range,
+        xlab = "Number of clusters (K)",
+        ylab = "Mean within-cluster SSE per timepoint",
+        main = "Actual Within Group SSE vs Random Within Group SSE")
+lines(1:Kmax, actual_sse_log, col = "blue", lwd = 3)
+legend("topright",
+       legend = c("Actual data", "Permuted scores"),
+       col    = c("blue", adjustcolor("red", 0.6)),
+       lty    = 1, lwd = c(3, 1), bty = "n")
+dev.off()
+###
+
+#Figure : difference curves
+
+
+perm_min  <- apply(perm_sse_mat, 2, min,  na.rm = TRUE)
+perm_mean <- apply(perm_sse_mat, 2, mean, na.rm = TRUE)
+
+diff_min  <- perm_min - actual_sse
+diff_mean <- perm_mean - actual_sse
+
+par(mfrow = c(1, 2))
+
+df <- data.frame(k = 1:Kmax, diff = diff_min)
+
+p <- ggplot(df, aes(k, diff)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Number of clusters",
+       y = "min permuted SSE - Actual SSE",
+       title = "Difference between Actual SSE and Min Random SSE") +
+  theme_minimal()
+ggsave("min_difference.png", plot = p, width = 6, height = 4, units = "in")
+df_2 <- data.frame(k = 1:Kmax, diff = diff_mean)
+p <- ggplot(df_2, aes(k, diff)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Number of clusters",
+       y = "mean permuted SSE - Actual SSE",
+       title = "Difference between Actual SSE and Mean Random SSE") +
+  theme_minimal()
+ggsave("mean_difference.png", plot = p, width = 6, height = 4, units = "in")
+
+par(mfrow = c(1, 1))
+
+```
+
+```{r}
+# cluster aging curves for 100m men
+## ---- reconstruct Pred_mat for clustering (no clamp) ----
+timegrid <- seq(grid_start, grid_end, by = 1L)
+
+mu_fd  <- meanfit$pc_fit
+pc1_fd <- pc1s$pc_fit
+pc2_fd <- pc2s$pc_fit
+
+mu_t  <- as.numeric(eval.fd(timegrid, mu_fd))
+phi1  <- as.numeric(eval.fd(timegrid, pc1_fd))
+phi2  <- as.numeric(eval.fd(timegrid, pc2_fd))
+
+# athletes actually used in PC2
+ids_clust <- ids[keep2]
+
+Alpha <- cbind(score1[keep2], score2[keep2])  # n_clust x 2
+Alpha <- as.matrix(Alpha)
+
+n_clust <- nrow(Alpha)
+Tlen    <- length(timegrid)
+
+Phi <- rbind(phi1, phi2)                      # 2 x T
+
+mu_mat   <- matrix(mu_t, nrow = n_clust, ncol = Tlen, byrow = TRUE)
+Pred_mat <- Alpha %*% Phi + mu_mat           # n_clust x T matrix
+Pred_mat <- as.matrix(Pred_mat)
+
+dim(Pred_mat)   # should be e.g. 675 37
+stopifnot(nrow(Pred_mat) == length(ids_clust))
+###################
+set.seed(202200228)
+cl_kmeans <- kmeans(Pred_mat, centers = 3)
+cl_ind <- cl_kmeans$cluster
+cl_cen <- cl_kmeans$centers
+#plot
+seq_age <- timegrid
+n <- nrow(Pred_mat)
+par(mar = c(4, 4, 1, 1))
+png("iaaf points_clusters.png",
+    width  = 7,   # inches
+    height = 5,
+    units  = "in",
+    res    = 300)
+colset <- c("#E69A8DFF", "#F6D55C", "#2A9D8F", "#5F4B8BFF")
+plot(NULL, xlim = range(seq_age) ,ylim = c(min(Pred_mat, na.rm = TRUE), max(Pred_mat, na.rm = TRUE)), xlab = "age", 
+     ylab = "world athletics points", bty = "n")
+
+for(i in 1:n){
+  lines(seq_age, Pred_mat[i,], col = colset[cl_ind[i]])
+}
+
+lines(seq, cl_cen[1,], col = "darkred", type = "l", lwd = 3)
+lines(seq, cl_cen[2,], col = "darkorange", lwd = 3)
+lines(seq, cl_cen[3,], col = "darkgreen", lwd = 3)
+dev.off()
+```
+
+```{r}
+library(dplyr)
+library(gt)
+
+## 1. Tabulate IAAF clusters ------------------------------------
+tab_clusters_iaaf <- table(cl_ind)
+
+cluster_summary_iaaf <- data.frame(
+  cluster    = as.integer(names(tab_clusters_iaaf)),
+  n_athletes = as.vector(tab_clusters_iaaf),
+  pct        = round(100 * as.vector(tab_clusters_iaaf) / length(cl_ind), 1)
+)
+
+cluster_summary_iaaf$label <- c("Red",
+                                "Yellow",
+                                "Green")[cluster_summary_iaaf$cluster]
+
+cluster_summary_iaaf <- cluster_summary_iaaf %>%
+  rename(
+    Cluster = cluster,
+    Count   = n_athletes,
+    Percent = pct,
+    label   = label
+  )
+
+cluster_summary_iaaf
+
+cluster_summary_iaaf |>
+  gt() |>
+  tab_header(
+    title = "Table 1: IAAF points Cluster summary"
+  ) |>
+  gtsave("cluster_table_iaaf.png")
+
+```
+
+
+
+
+```{r}
+## all athlete IDs in the red cluster
+ids_red <- ids_clust[cl_ind == 1]
+ids_yellow <- ids_clust
+
+ids_red
+idx_red <- which(cl_ind == 1)
+dist2   <- rowSums(
+  (Pred_mat[idx_red, ] -
+     matrix(cl_cen[1, ], nrow = length(idx_red), ncol = ncol(Pred_mat), byrow = TRUE))^2
+)
+best_red_id <- ids_clust[idx_red[which.min(dist2)]]
+
+best_red_id
+length(ids_red)
+## 2) Last observed age for red-cluster athletes
+
+# t_last_vec is last observed age for ALL ids, in the same order as 'ids'
+# First map last ages to the subset 'ids_clust'
+t_last_clust <- t_last_vec[match(ids_clust, ids)]
+
+# Then keep only the red-cluster ones
+t_last_red <- t_last_clust[idx_red]
+
+# vector of last observed ages:
+t_last_red
+
+# quick summary:
+summary(t_last_red)
+table(t_last_red)   # frequency by last age
+
+```
+
+```{r}
+example_id_test <- "singapore/jin-wei-timothee-yap-014479805 100 Metres" 
+p <- ggplot() +
+  geom_line(
+    data = filter(predict_curve, id == example_id_test),
+    aes(x = t, y = yhat),
+    linewidth = 1
+  ) +
+  geom_point(
+    data = filter(obs_df, id == example_id_test),
+    aes(x = age, y = y),
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = meanWCS_points_by_gender["men"],   # world-class standard
+    linetype   = "dashed",
+    color      = "red"
+  ) +
+  labs(
+    x = "Performance age (years)",
+    y = "World Athletic points",
+    title = paste("imFunPCA aging curve for Kim Collins"),
+    subtitle = "Dashed line: world-class standard for men (≈1147 World Athletic points)"
+  ) +
+  theme_minimal(base_size = 12)
+p
+```
+
+
+```{r}
+# imFunPCA method's aging curve on log WA points (men's 100m)
+library(dplyr)
+library(fda)
+
+## 1. One value per age per athlete, on log scale
+fd_100m_men_mean_log <- fd_100m %>%
+  filter(gender == "men") %>%
+  group_by(id, age) %>%
+  summarise(result_score = mean(result_score), .groups = "drop") %>%
+  mutate(result_log = log(result_score)) %>%   # log-transform
+  arrange(id, age)
+
+athlete_ids_log <- unique(fd_100m_men_mean_log$id)
+
+## 2. Build athlete-specific right-censoring lists (log scale)
+grid_start_log <- max(1, floor(min(fd_100m_men_mean_log$age, na.rm = TRUE))) # 14
+grid_end_log   <- ceiling(max(fd_100m_men_mean_log$age, na.rm = TRUE))       # 50
+grid_step_log  <- 1L
+
+make_log_lists <- function(dat_i) {
+  dat_i    <- arrange(dat_i, age)
+  ages_i   <- dat_i$age
+  z_i      <- dat_i$result_log          # log points
+  t_last_i <- max(ages_i)
+  c_last_i <- z_i[which.max(ages_i)]
+
+  # censored tail ages after last observed age
+  ages_cens_i <- if (t_last_i < grid_end_log)
+    seq(t_last_i + grid_step_log, grid_end_log, by = grid_step_log)
+  else numeric(0)
+
+  list(
+    timepoints = c(ages_i, ages_cens_i),
+    observed   = c(z_i, rep(c_last_i, length(ages_cens_i))),
+    delta      = c(rep(0, length(ages_i)), rep(1, length(ages_cens_i))),
+    t_last     = t_last_i,
+    c_last     = c_last_i
+  )
+}
+
+lists_log <- lapply(athlete_ids_log, function(id_i) {
+  make_log_lists(filter(fd_100m_men_mean_log, id == id_i))
+})
+
+timepoints_log <- lapply(lists_log, `[[`, "timepoints")
+observed_log   <- lapply(lists_log, `[[`, "observed")   # log(points)
+delta_log      <- lapply(lists_log, `[[`, "delta")
+t_last_vec_log <- sapply(lists_log, `[[`, "t_last")
+c_last_vec_log <- sapply(lists_log, `[[`, "c_last")
+
+## 3. Basis + mean fit (log scale)
+K_log <- 6
+spline_basis_log <- create.bspline.basis(
+  rangeval = c(grid_start_log, grid_end_log),
+  nbasis   = K_log,
+  norder   = 4
+)
+
+meanfit_log <- findmean(
+  observed   = observed_log,
+  timepoints = timepoints_log,
+  delta      = delta_log,
+  minit      = K_log,
+  threshold  = 1e-5
+)
+
+## 4. Center and get first two FPCs (log scale)
+observed_center_log <- lapply(seq_along(observed_log), function(i) {
+  (observed_log[[i]] - eval.fd(timepoints_log[[i]], meanfit_log$pc_fit))[, 1]
+})
+
+pc1_log <- first_FPC(
+  beta1      = rnorm(K_log),
+  observed   = observed_center_log,
+  timepoints = timepoints_log,
+  delta      = delta_log,
+  threshold  = 1e-3
+)
+
+previous_beta_log <- list(pc1_log$beta)
+
+pc2_log <- third_FPC_conditional(
+  beta3      = rnorm(K_log),
+  pc_index   = 2,
+  observed   = observed_center_log,
+  timepoints = timepoints_log,
+  delta      = delta_log,
+  betalist   = previous_beta_log,
+  threshold  = 1e-3
+)
+```
+
+```{r}
+# ==== Number of clusters (k-means) with log-scale imFunPCA ====
+
+# Reconstructed curves on common grid
+timegrid <- seq(grid_start, grid_end, by = 1)
+
+mu_fd  <- meanfit$pc_fit      # mean on log-scale
+pc1_fd <- pc1s$pc_fit         # PC1 on log-scale
+pc2_fd <- pc2s$pc_fit         # PC2 on log-scale
+
+# mean curve on grid (log points)
+mu_t <- as.numeric(eval.fd(timegrid, mu_fd))
+
+# eigenfunctions on grid (log scale)
+Phi <- cbind(
+  as.numeric(eval.fd(timegrid, pc1_fd)),
+  as.numeric(eval.fd(timegrid, pc2_fd))
+)  # (T x 2)
+
+# restrict clustering to athletes that have scores for PC2
+idx_clust <- keep2
+ids_clust <- ids[idx_clust]
+
+Alpha <- cbind(score1[idx_clust], score2[idx_clust])  # (n_clust x 2) scores
+Alpha <- as.matrix(Alpha)
+
+# mean matrix (log scale)
+mu_mat <- matrix(mu_t,
+                 nrow = nrow(Alpha),
+                 ncol = length(mu_t),
+                 byrow = TRUE)
+
+# Predicted curves on log scale
+Pred_log_mat <- Alpha %*% t(Phi) + mu_mat   # (n_clust x T), smooth curves on log scale
+Pred_log_mat <- as.matrix(Pred_log_mat)
+
+# Optional safety check
+stopifnot(all(is.finite(Pred_log_mat)))
+
+# For clustering, stay on log-scale
+Pred_clust <- Pred_log_mat   # <- use this in k-means
+
+# ---- Actual within-cluster SSE vs K ----
+
+Kmax <- 8
+
+actual_sse <- sapply(1:Kmax, function(k) {
+  km <- kmeans(Pred_clust, centers = k, nstart = 20, iter.max = 200)
+  km$tot.withinss / ncol(Pred_clust)   # mean SSE per time point (log-points scale)
+})
+
+# ---- Permutation baseline (shuffle scores) ----
+
+set.seed(468)
+n_perm <- 25
+perm_sse_mat <- matrix(NA_real_, nrow = n_perm, ncol = Kmax)
+
+for (b in 1:n_perm) {
+  # shuffle each PC score column independently
+  perm_alpha <- apply(Alpha, 2, sample)
+
+  # reconstruct permuted curves on log scale
+  perm_log <- perm_alpha %*% t(Phi) + mu_mat   # log-points
+  # use log scale for clustering as well
+  perm_data <- perm_log
+
+  # K-means on permuted curves (log scale)
+  perm_sse_mat[b, ] <- sapply(1:Kmax, function(k) {
+    tryCatch(
+      kmeans(perm_data, centers = k, nstart = 10, iter.max = 100)$tot.withinss /
+        ncol(perm_data),
+      error = function(e) NA_real_
+    )
+  })
+}
+
+# ---- Figure: actual vs random SSE (still take log for plotting) ----
+actual_sse_log   <- log(actual_sse)
+perm_sse_mat_log <- log(perm_sse_mat)
+
+y_range <- range(c(as.vector(perm_sse_mat_log), actual_sse_log), na.rm = TRUE)
+
+png("sse_actual_vs_permuted.png", width = 6, height = 4, units = "in", res = 300)
+matplot(1:Kmax, t(perm_sse_mat_log), type = "l", lty = 1,
+        col  = adjustcolor("red", alpha.f = 0.25),
+        ylim = y_range,
+        xlab = "Number of clusters (K)",
+        ylab = "Mean within-cluster SSE per timepoint (log-points SSE)",
+        main = "Actual Within-Group SSE vs Random Within-Group SSE")
+lines(1:Kmax, actual_sse_log, col = "blue", lwd = 3)
+legend("topright",
+       legend = c("Actual data", "Permuted scores"),
+       col    = c("blue", adjustcolor("red", 0.6)),
+       lty    = 1, lwd = c(3, 1), bty = "n")
+dev.off()
+
+# ---- Figure: difference curves (SSE on log-points scale) ----
+
+perm_min  <- apply(perm_sse_mat, 2, min,  na.rm = TRUE)
+perm_mean <- apply(perm_sse_mat, 2, mean, na.rm = TRUE)
+
+diff_min  <- perm_min  - actual_sse
+diff_mean <- perm_mean - actual_sse
+
+par(mfrow = c(1, 2))
+
+df_min <- data.frame(k = 1:Kmax, diff = diff_min)
+p_min <- ggplot(df_min, aes(k, diff)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Number of clusters",
+       y = "min permuted SSE - Actual SSE",
+       title = "Difference between Actual SSE and Min Random SSE") +
+  theme_minimal()
+ggsave("min_difference.png", plot = p_min, width = 6, height = 4, units = "in")
+
+df_mean <- data.frame(k = 1:Kmax, diff = diff_mean)
+p_mean <- ggplot(df_mean, aes(k, diff)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Number of clusters",
+       y = "mean permuted SSE - Actual SSE",
+       title = "Difference between Actual SSE and Mean Random SSE") +
+  theme_minimal()
+ggsave("mean_difference.png", plot = p_mean, width = 6, height = 4, units = "in")
+
+par(mfrow = c(1, 1))
+
+
+```
+
+```{r}
+## ---- cluster aging curves for 100m men (log-scale) ----
+timegrid <- seq(grid_start, grid_end, by = 1L)
+
+# use the LOG-scale fits explicitly
+mu_fd_log  <- meanfit_log$pc_fit    # mean on log scale
+pc1_fd_log <- pc1_log$pc_fit        # PC1 on log scale
+pc2_fd_log <- pc2_log$pc_fit        # PC2 on log scale
+
+# evaluate on grid (log scale)
+mu_t_log  <- as.numeric(eval.fd(timegrid, mu_fd_log))
+phi1_log  <- as.numeric(eval.fd(timegrid, pc1_fd_log))
+phi2_log  <- as.numeric(eval.fd(timegrid, pc2_fd_log))
+
+# athletes actually used in PC2
+ids_clust <- athlete_ids_log[keep2]   # or just ids[keep2] if same vector
+
+Alpha_log <- cbind(score1[keep2], score2[keep2])  # n_clust x 2
+Alpha_log <- as.matrix(Alpha_log)
+
+n_clust <- nrow(Alpha_log)
+Tlen    <- length(timegrid)
+
+Phi_log <- rbind(phi1_log, phi2_log)             
+
+# mean matrix (log scale)
+mu_mat_log <- matrix(mu_t_log, nrow = n_clust, ncol = Tlen, byrow = TRUE)
+
+# reconstructed curves on LOG scale
+Pred_log_mat <- Alpha_log %*% Phi_log + mu_mat_log   # n_clust x T
+Pred_log_mat <- as.matrix(Pred_log_mat)
+
+dim(Pred_log_mat)   # e.g. 675 x 37
+stopifnot(nrow(Pred_log_mat) == length(ids_clust))
+stopifnot(all(is.finite(Pred_log_mat)))
+
+## k-means on log-scale curves
+set.seed(202200228)
+cl_kmeans_log  <- kmeans(Pred_log_mat, centers = 3)
+cl_ind         <- cl_kmeans_log$cluster
+cl_cen_log     <- cl_kmeans_log$centers   # cluster means on log scale
+
+## plot on log scale
+seq_age <- timegrid
+n       <- nrow(Pred_log_mat)
+
+par(mar = c(4, 4, 1, 1))
+colset <- c("#E69A8DFF", "#F6D55C", "#2A9D8F", "#5F4B8BFF")
+
+plot(
+  NULL,
+  xlim = range(seq_age),
+  ylim = range(Pred_log_mat, na.rm = TRUE),
+  xlab = "age",
+  ylab = "log World Athletics points",
+  bty  = "n"
+)
+
+for (i in 1:n) {
+  lines(seq_age, Pred_log_mat[i, ], col = colset[cl_ind[i]])
+}
+
+lines(seq_age, cl_cen_log[1, ], col = "darkred",   lwd = 3)
+lines(seq_age, cl_cen_log[2, ], col = "darkorange", lwd = 3)
+lines(seq_age, cl_cen_log[3, ], col = "darkgreen",  lwd = 3)
+#######################################
+# Pred_points <- exp(Pred_log_mat)
+# 
+# # (optional) clip huge values for nicer plotting:
+# ylim_max <- quantile(Pred_points, 0.99, na.rm = TRUE)
+# Pred_points_plot <- pmin(Pred_points, ylim_max)
+# 
+# plot(NULL, xlim = range(timegrid),
+#      ylim = c(0, ylim_max),
+#      xlab = "age", ylab = "World Athletics points", bty = "n")
+# for (i in 1:nrow(Pred_points_plot)) {
+#   lines(timegrid, Pred_points_plot[i, ], col = colset[cl_ind[i]])
+# }
+
+```
+
+
+
+```{r}
+library(dplyr)
+
+obs_summary <- fd_100m_men_mean %>%
+  group_by(id) %>%
+  summarise(
+    n_obs = n(),
+    min_age = min(age, na.rm = TRUE),
+    max_age = max(age, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 1) how many athletes with < 3 rows in fd_100m_men_mean?
+sum(obs_summary$n_obs < 3)
+
+# 2) who are they?
+ids_lt3 <- obs_summary$id[obs_summary$n_obs < 3]
+length(ids_lt3)
+ids_lt3[1:20]
+
+```
