@@ -1,0 +1,354 @@
+---
+title: "track&field_Percent_change_code"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-11-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(readr)
+library(ggplot2)
+library(refund)
+library(face)
+library(fda)
+library(purrr)
+library(tidyr)
+library(stringr)
+```
+
+
+```{r}
+# Within each athlete, compute percent change vs previous observed score
+fd_100m_men_pc <- fd_100m_men_mean %>%
+  group_by(id) %>%
+  arrange(age, .by_group = TRUE) %>%
+  mutate(
+    result_prev   = lag(result_score),
+    pct_change    = (result_score - result_prev) / result_prev
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(pct_change)) %>% # drop first rows
+  dplyr::select(id, age, pct_change)  # this is the new “response”
+
+ids_pc <- unique(fd_100m_men_pc$id)
+
+############ build athlete specific right-censoring lists
+grid_start_pc <- max(1, floor(min(fd_100m_men_pc$age, na.rm=TRUE))) #15
+grid_end_pc   <- ceiling(max(fd_100m_men_pc$age, na.rm=TRUE))       #50
+grid_step  <- 1                                        
+
+make_lists_pc <- function(di) {
+  di_pc <- arrange(di, age)
+  ages_obs_pc   <- di_pc$age
+  scores_obs_pc <- di_pc$pct_change
+  t_last_pc     <- max(ages_obs_pc)
+  c_last_pc     <- scores_obs_pc[which.max(ages_obs_pc)]
+
+  # censored tail ages after the athlete's last observed age
+  ages_censor_pc  <- if (t_last_pc < grid_end_pc) seq(t_last_pc + grid_step, grid_end_pc, by = grid_step) 
+                 else numeric(0)
+
+  list(
+    timepoints = c(ages_obs_pc, ages_censor_pc),
+    observed   = c(scores_obs_pc, rep(c_last_pc, length(ages_censor_pc))),
+    delta      = c(rep(0, length(ages_obs_pc)), rep(1, length(ages_censor_pc))),
+    t_last     = t_last_pc,
+    c_last     = c_last_pc
+  )
+}
+
+lst_pc <- lapply(ids_pc, function(z) make_lists_pc(filter(fd_100m_men_pc, id == z)))
+timepoints_pc <- lapply(lst_pc, `[[`, "timepoints")
+observed_pc   <- lapply(lst_pc, `[[`, "observed")
+delta_pc      <- lapply(lst_pc, `[[`, "delta")
+t_last_vec_pc <- sapply(lst_pc, `[[`, "t_last")
+c_last_vec_pc <- sapply(lst_pc, `[[`, "c_last")
+
+##########################################################################################
+
+# basis + fit mean
+K <- 6
+spline_basis_pc <- create.bspline.basis(rangeval = c(14, 50), nbasis = K, norder = 4)
+spline_basis <- spline_basis_pc
+meanfit_pc <- findmean(
+  observed   = observed_pc,
+  timepoints = timepoints_pc,
+  delta      = delta_pc,
+  minit      = K,
+  threshold  = 1e-5
+)
+
+#center, then PC1 and PC2
+observed_center_pc <- lapply(seq_along(observed_pc), function(i) {
+  (observed_pc[[i]] - eval.fd(timepoints_pc[[i]], meanfit_pc$pc_fit))[, 1]
+})
+
+pc1s_pc <- first_FPC(rnorm(K), 
+                     observed   = observed_center_pc,
+                     timepoints = timepoints_pc,
+                      delta      = delta_pc,
+                     threshold = 1e-2)
+
+previous_beta_pc <- list(pc1s_pc$beta)
+# pc2
+pc2s_pc <- third_FPC_conditional(rnorm(K), 2, 
+                                 observed   = observed_center_pc,
+  timepoints = timepoints_pc,
+  delta      = delta_pc,
+  betalist   = previous_beta_pc,
+  threshold = 1e-2)
+
+```
+
+```{r}
+# plot aging curve using imFunPCA, use 2 pcs
+tt_pc   <- seq(grid_start_pc, grid_end_pc, by = 1)
+mu_pc   <- eval.fd(tt_pc, meanfit_pc$pc_fit)
+phi1_pc <- eval.fd(tt_pc, pc1s_pc$pc_fit)
+phi2_pc <- eval.fd(tt_pc, pc2s_pc$pc_fit)
+# phi3 <- eval.fd(tt, pc3s$pc_fit)
+
+# score1 <- pc1s$sfit
+# score2 <- pc2s$sfit   # if no subjects got dropped; otherwise do the align_scores trick
+###fix different numbers of pcs#####
+n_pc <- length(ids_pc)
+
+# how many *observed* (uncensored) ages each athlete has
+obs_counts_pc <- sapply(delta_pc, function(z) sum(1 - z))
+
+# subjects kept inside third_FPC_conditional for pc_index = 2:
+keep_idx_m_pc <- function(m) which(obs_counts_pc > m)
+keep2_pc <- keep_idx_m_pc(2)
+
+# pc2s$sfit is a matrix: [#kept subjects] x [#PCs so far]
+#dim(pc2s$sfit)    
+
+#last_col <- ncol(pc2s$sfit) 
+
+score1_pc <- numeric(n_pc)
+score2_pc <- numeric(n_pc)
+score1_pc[keep2_pc] <- pc2s_pc$sfit[, 1]   # PC1 scores (updated)
+score2_pc[keep2_pc] <- pc2s_pc$sfit[, 2]   
+
+
+predict_one_pc <- function(i, M = 2, clamp_range = TRUE) {
+  yhat_pc <- as.numeric(mu_pc +
+                     score1_pc[i] * phi1_pc +
+                     (M >= 2) * score2_pc[i] * phi2_pc)
+
+  # if (clamp_nonneg)   yhat <- pmax(0, yhat)
+  # if (cap_after_last) yhat <- ifelse(tt > t_last_vec[i], pmin(yhat, c_last_vec[i]), yhat)
+
+  data.frame(id = ids_pc[i], age = tt_pc, yhat_prop = yhat_pc, yhat_pct = yhat_pc)
+}
+
+predict_curve_pc <- do.call(rbind, lapply(seq_along(ids_pc), predict_one_pc, M = 2))
+###################################################################
+# Build observed data frame (only uncensored points)
+obs_df_pc <- do.call(rbind, lapply(seq_along(ids_pc), function(i) {
+  keep <- delta_pc[[i]] == 0          # uncensored ages only
+  y_i  <- observed_pc[[i]][keep]
+
+  data.frame(
+    id     = ids_pc[i],
+    age    = timepoints_pc[[i]][keep],
+    y_prop = y_i,
+    y_pct  = y_i
+  )
+}))
+
+
+#Plot for Usain bolt
+ref_line <- 0
+example_id <- "jamaica/usain-bolt-014201847 100 Metres"
+   
+
+p <- ggplot() +
+  geom_line(
+    data = filter(predict_curve_pc, id == example_id),
+    aes(x = age, y = yhat_pct),
+    linewidth = 1
+  ) +
+  geom_point(
+    colour = "blue",
+    data = filter(obs_df_pc, id == example_id),
+    aes(x = age, y = y_pct),
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = ref_line,   # world-class standard
+    linetype   = "dashed",
+    color      = "red"
+  ) +
+  labs(
+    x = "Performance age (years)",
+    y = "Percent Change in World Athletic points",
+    title = paste("Usain Bolt: Percent change aging curve"),
+    subtitle = "Dashed line: 0"
+  ) +
+  theme_minimal(base_size = 12)
+ggsave("Usain_Bolt_pc.png", plot = p, width = 6, height = 4, units = "in")
+# plot for kim collins
+example_id <- "saint-kitts-and-nevis/kim-collins-014224942 100 Metres"
+   
+
+p <- ggplot() +
+  geom_line(
+    data = filter(predict_curve_pc, id == example_id),
+    aes(x = age, y = yhat_pct),
+    linewidth = 1
+  ) +
+  geom_point(
+    colour = "blue",
+    data = filter(obs_df_pc, id == example_id),
+    aes(x = age, y = y_pct),
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = ref_line,   # world-class standard
+    linetype   = "dashed",
+    color      = "red"
+  ) +
+  labs(
+    x = "Performance age (years)",
+    y = "Percent change in World Athletic points",
+    title = paste("Kim Collins: Percent change aging curve"),
+    subtitle = "Dashed line: 0"
+  ) +
+  theme_minimal(base_size = 12)
+ggsave("Kim_Collins_pc.png", plot = p, width = 6, height = 4, units = "in")
+
+```
+
+```{r}
+###cluster on percent change
+## thresholds based on score distributions (change if you like)
+thr1 <- quantile(abs(score1_pc[keep2_pc]), 0.99, na.rm = TRUE)
+thr2 <- quantile(abs(score2_pc[keep2_pc]), 0.99, na.rm = TRUE)
+
+good_idx_local <- which(
+  abs(score1_pc[keep2_pc]) <= thr1 &
+  abs(score2_pc[keep2_pc]) <= thr2
+)
+
+length(good_idx_local)        # how many athletes kept
+length(keep2_pc)              # total before trimming
+
+# cluster aging curves for 100m men
+## ---- reconstruct Pred_mat for clustering (no clamp) ----
+timegrid_pc <- seq(grid_start_pc, grid_end_pc, by = 1L)
+
+mu_fd_pc  <- meanfit_pc$pc_fit
+pc1_fd_pc <- pc1s_pc$pc_fit
+pc2_fd_pc <- pc2s_pc$pc_fit
+
+mu_t_pc  <- as.numeric(eval.fd(timegrid_pc, mu_fd_pc))
+phi1_pc  <- as.numeric(eval.fd(timegrid_pc, pc1_fd_pc))
+phi2_pc  <- as.numeric(eval.fd(timegrid_pc, pc2_fd_pc))
+
+# athletes actually used in PC2
+# ids_clust_pc <- ids_pc[keep2_pc]
+# 
+# Alpha_pc <- cbind(score1_pc[keep2_pc], score2_pc[keep2_pc])  # n_clust x 2
+# Alpha_pc <- as.matrix(Alpha_pc)
+# 
+# n_clust_pc <- nrow(Alpha_pc)
+# Tlen_pc    <- length(timegrid_pc)
+# 
+# Phi_pc <- rbind(phi1_pc, phi2_pc)                      # 2 x T
+# 
+# mu_mat_pc   <- matrix(mu_t_pc, nrow = n_clust_pc, ncol = Tlen_pc, byrow = TRUE)
+# Pred_mat_pc <- Alpha_pc %*% Phi_pc + mu_mat_pc           # n_clust x T matrix
+# Pred_mat_pc <- as.matrix(Pred_mat_pc)
+# 
+# dim(Pred_mat_pc)   # should be e.g. 675 37
+# stopifnot(nrow(Pred_mat_pc) == length(ids_clust_pc))
+Alpha_pc_good    <- Alpha_pc[good_idx_local, , drop = FALSE]
+ids_clust_pc_good <- ids_clust_pc[good_idx_local]
+Pred_mat_pc_good <- Pred_mat_pc[good_idx_local, , drop = FALSE]
+Pred_mat_pc_good <- pmax(pmin(Pred_mat_pc_good,  2), -4)
+n_clust_pc_good <- nrow(Pred_mat_pc_good)
+
+###################
+# set.seed(202200228)
+# cl_kmeans_pc <- kmeans(Pred_mat_pc, centers = 3)
+# cl_ind_pc <- cl_kmeans_pc$cluster
+# cl_cen_pc <- cl_kmeans_pc$centers
+###################
+set.seed(202200228)
+cl_kmeans_pc <- kmeans(Pred_mat_pc_good, centers = 3)
+cl_ind_pc    <- cl_kmeans_pc$cluster
+cl_cen_pc    <- cl_kmeans_pc$centers
+##################
+#plot
+seq_age_pc <- timegrid_pc
+#n_pc <- nrow(Pred_mat_pc)
+png("percent_change_clusters.png",
+    width  = 7,   # inches
+    height = 5,
+    units  = "in",
+    res    = 300)
+n_pc_good  <- nrow(Pred_mat_pc_good)
+par(mar = c(4, 4, 1, 1))
+colset <- c("#E69A8DFF", "#F6D55C", "#2A9D8F", "#5F4B8BFF")
+plot(NULL, xlim = range(seq_age_pc) ,ylim = c(min(Pred_mat_pc_good, na.rm = TRUE),
+           max(Pred_mat_pc_good, na.rm = TRUE)), xlab = "age", 
+     ylab = "percent change in world athletics points", bty = "n")
+
+for(i in 1:n_pc_good){
+  lines(seq_age_pc, Pred_mat_pc_good[i,], col = colset[cl_ind_pc[i]])
+}
+
+lines(seq_age_pc, cl_cen_pc[1,], col = "darkred", type = "l", lwd = 3)
+lines(seq_age_pc, cl_cen_pc[2,], col = "darkorange", lwd = 3)
+lines(seq_age_pc, cl_cen_pc[3,], col = "darkgreen", lwd = 3)
+dev.off()
+
+
+
+```
+
+```{r}
+tab_clusters <- table(cl_ind_pc)
+tab_clusters
+cluster_summary <- data.frame(
+  cluster    = as.integer(names(tab_clusters)),
+  n_athletes = as.vector(tab_clusters),
+  pct        = round(100 * as.vector(tab_clusters) / length(cl_ind_pc), 1)
+)
+cluster_summary$label <- c("Red",
+                           "Yellow",
+                           "Green") [cluster_summary$cluster]
+cluster_summary <- cluster_summary %>%
+  rename(
+    Cluster      = cluster,
+    Count        = n_athletes,
+    Percent      = pct,
+    label  = label
+  )
+library(gt)
+
+df <- data.frame(
+  Cluster = 1:3,
+  Count   = c(141, 190, 299),
+  Percent = c(22.4, 30.2, 47.5),
+  label   = c("Red", "Yellow", "Green")
+)
+
+df |>
+  gt() |>
+  tab_header(
+    title = "Table 2: Percent change Cluster summary"   # <-- table name
+  ) |>
+  gtsave("cluster_table_pc.png")
+
+cluster_summary
+
+```
