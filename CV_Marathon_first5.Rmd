@@ -4,26 +4,783 @@ output: html_document
 date: "2026-04-01"
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r}
+library(dplyr)
+library(lubridate)
+library(readr)
+library(ggplot2)
+library(refund)
+library(face)
+library(fda)
+library(purrr)
+library(tidyr)
+library(stringr)
+library(nloptr)
 ```
 
-## R Markdown
+```{r}
+findmean = function(observed,timepoints,delta,threshold=1e-3,minit=3,gamma=0){
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+yem = do.call(c,observed)
+deltaem= do.call(c,delta)
 
-```{r cars}
-summary(cars)
+xalpha = lapply(1:length(observed),function(subj_index){
+
+	(timei =timepoints[[subj_index]])
+	xmati = eval.basis(timei, spline_basis)
+	xmati
+
+})%>%do.call(rbind,.)
+
+sigma <<- findsigma(yem,as.matrix(xalpha),deltaem)
+
+beta1 = lmcensor(yem,as.matrix(xalpha),deltaem)
+
+	
+pc_fit = fd(beta1, spline_basis)
+
+beta1 = coef(pc_fit)%>%as.numeric
+return(list(beta=beta1,pc_fit = pc_fit))
+
+}
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
+```{r}
+full_data <- read.csv("~/Desktop/Stat 468 final project/data/track and field data/data.csv")
+full_olympic <- read.csv("~/Desktop/Stat 468 final project/data/track and field data/olympic_results (1).csv")
+Olympics_data <- full_olympic %>%
+  janitor::clean_names() %>% 
+  separate_wider_delim(
+    cols   = event,
+    names  = c("gender_from_event", "event"),
+    delim  = " ",
+    too_many = "merge"
+  ) %>%
+  filter(str_detect(event, "Wheelchair", negate = TRUE)) %>% 
+  filter(race != "Combined - Group") |> 
+  mutate(
+    # fix Aminata CAMARA's birth date
+    birth_date = if_else(name == "Aminata CAMARA", "06 DEC 1973", birth_date),
+    birth_date = as.Date(birth_date, format = "%d %b %Y"),
+    age        = year(end_date) - year(birth_date),
+    games = factor(
+      event_name,
+      ordered = TRUE,
+      levels = c("The XXXIII Olympic Games","The XXXII Olympic Games",
+                 "The XXXI Olympic Games","The XXX Olympic Games",
+                 "The XXIX Olympic Games","The XXVIII Olympic Games",
+                 "The XXVII Olympic Games","The XXVI Olympic Games"),
+      labels = c("Paris 24","Tokyo '20","Rio '16","London '12",
+                 "Beijing '08","Athens '04","Sydney '00","Atlanta '96")
+    ),
+    event_type = case_match(
+      event,
+      c("100 Metres","200 Metres","400 Metres","400 Metres Hurdles",
+        "100 Metres Hurdles","110 Metres Hurdles") ~ "Sprints",
+      c("800 Metres","1500 Metres","3000 Metres Steeplechase") ~ "Middle Distance",
+      c("5000 Metres","10,000 Metres") ~ "Long Distance",
+      c("Heptathlon","Decathlon") ~ "Combined Events",
+      c("High Jump","Long Jump","Triple Jump","Pole Vault") ~ "Jumps",
+      c("Shot Put","Discus Throw","Hammer Throw",
+        "Javelin Throw","Javelin Throw (old)") ~ "Throws",
+      c("10 Kilometres Race Walk","20 Kilometres Race Walk",
+        "50 Kilometres Race Walk","Marathon") ~ "Road Races",
+      .default = "Other"
+    ),
+    event_category = if_else(
+      str_detect(event, "Metres|Walk|Wheelchair") | event %in% c("Marathon"),
+      "Track", "Field"
+    )
+  ) %>%
+  mutate(
+    event      = if_else(event == "Javelin Throw (old)", "Javelin Throw", event),
+    games_year = year(end_date),
+    gender = if_else(gender == "M", "men", "women")
+  ) %>% 
+  dplyr::select(url_slug,birth_date,gender, event_category, event) %>%
+  distinct(url_slug,event, .keep_all = TRUE)
+  # group_by(url_slug) %>%
+  # summarise(event,
+  #   birth_date = first(birth_date),
+  #   gender = first(gender),
+  #   event_category = first(event_category),
+  #   .groups = "drop"
+  
+olympic_events <- Olympics_data %>% distinct(event)
+#keep only rows in full_data_new whose discipline appears in Olympic_data
+full_data_kept <- full_data_new %>%
+  semi_join(olympic_events, by = c("discipline" = "event"))
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+full_data_new <- full_data %>% dplyr::select(date,results_by_year,competition,discipline,mark,result_score,athlete_id,athlete_link)
+
+# join full dataset with full Olympic data
+data_new_with_birthdate <- full_data_kept %>%
+  inner_join(
+    Olympics_data,
+    by = c("athlete_link" = "url_slug", "discipline" = "event")
+  ) %>% 
+  filter(!mark %in% c("DNF","DNS","DQ","NM","-","NT", "NH", "BLJ", "VST", "EXH"), !is.na(mark)) |> 
+  mutate(
+    age = results_by_year - year(birth_date),
+    
+    # keep original string mark
+    mark_raw = mark,
+    
+    # convert track marks to seconds; field marks to numeric distance
+    mark = if_else(
+      event_category == "Track",
+      as.numeric(
+        difftime(
+          lubridate::parse_date_time2(
+            mark_raw,
+            orders = c("%H:%M:%S", "%M:%S:00", "%M:%OS", "%OS"),
+            exact  = TRUE
+          ),
+          lubridate::parse_date_time2("0", orders = "S"),
+          units = "secs"
+        )
+      ),
+      parse_number(mark_raw)
+    ),
+    
+    # for cases lubridate couldn't parse (e.g., weird formats),
+    # fall back to parse_number()
+    mark = if_else(is.na(mark), parse_number(mark_raw), mark)
+  ) %>%
+  dplyr::select(-mark_raw) 
+
+# tidy dataset for FPCA called "fd_data_full"
+fd_data_full <- data_new_with_birthdate |> 
+  filter(discipline %in% disciplines_to_keep) |> 
+  filter(!is.na(age),
+    !is.na(result_score),
+    age != 0,
+    result_score != 0) |> 
+  mutate(id = paste(athlete_link,discipline)) |> 
+  dplyr::select(id, age, result_score, gender)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+###Step 0: Data Prep
+fd_Marathon <- fd_data_full |>
+filter(grepl(" Marathon$", id))
+
+fd_Marathon_men_median <- fd_Marathon %>%
+  filter(gender == "men") %>%
+  group_by(id, age) %>%
+  summarise(result_score = median(result_score), .groups = "drop") %>%
+  arrange(id, age) |> 
+# keep only athletes with >= 3 observed ages (data points)
+  group_by(id) %>%
+  filter(n() >= 6) %>%          # drop athletes with < 6 rows
+  ungroup()
+ids <- unique(fd_Marathon_men_median$id)
+```
+
+```{r}
+### split data to 5 folds
+set.seed(2026)                 
+K_folds <- 5                        
+
+uids  <- unique(fd_Marathon_men_median$id)         # get unique athlete IDs (keeps each athlete together)
+folds <- sample(rep(1:K_folds, length.out = length(uids)))  # assign each athlete to a fold 1..5
+
+id2fold <- data.frame(id = uids, fold = folds)        # lookup table: id -> fold
+fd_Marathon_men_median$fold <- id2fold$fold[match(fd_Marathon_men_median$id, id2fold$id)]     # attach fold label to every row in df
+
+# Example usage in a CV loop:
+fpca_list  <- vector("list", K_folds)
+imfun_list <- vector("list", K_folds)
+fpca_list_first5 <- vector("list", K_folds)
+imfun_list_first5<- vector("list", K_folds)
+cv_rows <- vector("list", K_folds)
+cv_rows_first5 <- vector("list", K_folds) 
+for (f in 1:K_folds) {
+  train <- fd_Marathon_men_median[fd_Marathon_men_median$fold != f, ]   # TRAIN rows
+  test  <- fd_Marathon_men_median[fd_Marathon_men_median$fold == f, ]   # TEST rows
+  
+  train_ids <- unique(train$id)  # IDs in TRAIN fold
+  #test_ids  <- unique(test$id) 
+  #  IDs in TEST fold
+  #find 2 pcs(eigenfunctions) from FPCA
+face_input <- train %>%
+  transmute(
+    y       = result_score,
+    argvals = age,
+    subj    = id
+  )
+
+# Age grid for prediction 
+age_grid <- seq(17, 56, by = 1)
+
+fit_face <- face.sparse(face_input, argvals.new = age_grid, calculate.scores = TRUE)
+#Smooth eigenfunctions 
+pc_fpca <- fit_face$eigenfunctions[, 1:2, drop = FALSE]
+
+# # calculate FPC scores for athletes
+########LS scores for 2 FPCA PCs 
+
+K_use <- 2                                # use 2 PCs
+tgrid <- fit_face$argvals.new             # training grid (same as age_grid)
+mu_g  <- fit_face$mu.new                  # training mean on grid
+# write a function to get score using least square(# LS scores for ONE test athlete using TRAIN mean + TRAIN PCs)
+get_sc_fpca <- function(t_obs, y_obs) {
+  mu_obs  <- approx(tgrid, mu_g,  xout = t_obs, rule = 2)$y                     # mu(t_obs)
+  Phi_obs <- sapply(1:K_use, function(k)
+    approx(tgrid, pc_fpca[, k], xout = t_obs, rule = 2)$y                          # phi_k(t_obs)
+  )                                                                             # n_i x 2
+  if (nrow(Phi_obs) < K_use) return(rep(NA_real_, K_use))  # not enough points
+  if (qr(Phi_obs)$rank < K_use) return(rep(NA_real_, K_use)) # if rank of Phi_obs is less than 2, then return NA
+  as.numeric(qr.coef(qr(Phi_obs), y_obs - mu_obs))    # LS scores
+}
+
+#FPCA: compute TEST scores + predict TEST y_hat  [CHANGE: use test + test_ids]
+# fpca_scores_2pc <- lapply(test_ids, function(z) {
+#   di <- fd_Marathon_men_median %>% filter(id == z) %>% arrange(age)
+#   if (nrow(di) < K_use) return(NULL)
+#   sc <- get_sc_fpca(di$age, di$result_score)
+#   data.frame(id = z, pc1 = sc[1], pc2 = sc[2])
+# }) %>% dplyr::bind_rows()
+# 
+# z <- fpca_scores_2pc_50$id[1]
+
+# =========================
+# FPCA: compute TEST scores + predict TEST y_hat  [CHANGE: use test + test_ids]
+# =========================
+fpca_pred <- test %>%
+  group_by(id) %>%
+  group_modify(~{
+    di <- arrange(.x, age) ###???####
+
+    sc <- get_sc_fpca(di$age, di$result_score)                        # test scores (2 numbers)
+
+    if (anyNA(sc)) {                                                  # if cannot estimate scores
+      di$yhat_fpca <- NA_real_
+      return(di)
+    }
+
+    # predict y_hat at each observed test age using TRAIN mean+PCs
+    mu_obs <- approx(tgrid, mu_g, xout = di$age, rule = 2)$y
+    phi1   <- approx(tgrid, pc_fpca[,1], xout = di$age, rule = 2)$y
+    phi2   <- approx(tgrid, pc_fpca[,2], xout = di$age, rule = 2)$y
+
+    di$yhat_fpca <- mu_obs + sc[1]*phi1 + sc[2]*phi2                  # yhat_test(age)
+    di
+  }) %>%
+  ungroup()
+##### first 3 prediction on test set########
+fpca_pred_first5 <- test %>%
+  group_by(id) %>%
+  group_modify(~{
+    di <- arrange(.x, age)
+
+    if (nrow(di) < 6) {
+      di$yhat_fpca <- NA_real_
+      return(di)
+    }
+
+    sc <- get_sc_fpca(di$age[1:5], di$result_score[1:5])
+
+    mu_obs <- approx(tgrid, mu_g, xout = di$age[-(1:5)], rule = 2)$y
+    phi1   <- approx(tgrid, pc_fpca[,1], xout = di$age[-(1:5)], rule = 2)$y
+    phi2   <- approx(tgrid, pc_fpca[,2], xout = di$age[-(1:5)], rule = 2)$y
+
+    di$yhat_fpca <- NA_real_
+    di$yhat_fpca[-(1:5)] <- mu_obs + sc[1]*phi1 + sc[2]*phi2
+
+    di
+  }) %>%
+  ungroup()
+##############################
+fpca_list[[f]]  <- fpca_pred  %>% mutate(fold = f)
+fpca_list_first5[[f]]  <- fpca_pred_first5 %>% mutate(fold = f)
+##########imfunPCA###################################
+###find 2 pc for imfunpca
+# basis + fit mean
+#build athlete specific right-censoring lists (change for traning set)
+grid_start <- max(1, floor(min(train$age, na.rm=TRUE))) #14
+grid_end   <- ceiling(max(train$age, na.rm=TRUE))       # 50 
+grid_step  <- 1  
+make_lists <- function(di) {
+  di <- arrange(di, age)
+  ages_obs   <- di$age
+  scores_obs <- di$result_score
+  t_last     <- max(ages_obs)
+  c_last     <- scores_obs[which.max(ages_obs)]
+
+  # censored tail ages after the athlete's last observed age
+  ages_censor  <- if (t_last < grid_end) seq(t_last + grid_step, grid_end, by = grid_step) 
+                 else numeric(0)
+
+  list(
+    timepoints = c(ages_obs, ages_censor),
+    observed   = c(scores_obs, rep(c_last, length(ages_censor))),
+    delta      = c(rep(0, length(ages_obs)), rep(1, length(ages_censor))),
+    t_last     = t_last,
+    c_last     = c_last
+  )
+}
+
+lst <- lapply(train_ids, function(z) make_lists(filter(train, id == z)))
+timepoints <- lapply(lst, `[[`, "timepoints")
+observed   <- lapply(lst, `[[`, "observed")
+delta      <- lapply(lst, `[[`, "delta")
+#t_last_vec <- sapply(lst, `[[`, "t_last")
+#c_last_vec <- sapply(lst, `[[`, "c_last")
+### basis + fit mean
+K_basis <- 6
+spline_basis <- create.bspline.basis(rangeval = c(17, 56), nbasis = K_basis, norder = 4)
+
+meanfit <- findmean(
+  observed   = observed,
+  timepoints = timepoints,
+  delta      = delta,
+  minit      = K_basis,
+  threshold  = 1e-5
+)
+
+#center, then PC1 and PC2
+observed_center <- lapply(seq_along(observed), function(i) {
+  (observed[[i]] - eval.fd(timepoints[[i]], meanfit$pc_fit))[, 1]
+})
+
+pc1s <- first_FPC(rnorm(K_basis), observed_center, timepoints, delta, threshold = 1e-3)
+
+previous_beta <- list(pc1s$beta)
+# pc2
+pc2s <- third_FPC_conditional(rnorm(K_basis), 2, observed_center, timepoints, delta,
+                              betalist = previous_beta, threshold = 1e-3)
+
+# LS scores for ONE test athlete using TRAIN mean + TRAIN PCs
+get_sc_imfun <- function(t_obs, y_obs) {
+  # mean at observed ages
+  mu_obs <- as.numeric(eval.fd(t_obs, meanfit$pc_fit))
+
+  # evaluate eigenfunctions at observed ages: phi_k(t) = B(t)%*%beta_k
+  B_obs  <- eval.basis(t_obs, spline_basis)          # n_i x K_basis
+  phi1   <- as.numeric(B_obs %*% pc1s$beta)          # n_i
+  phi2   <- as.numeric(B_obs %*% pc2s$beta)          # n_i
+  Phi    <- cbind(phi1, phi2)                        # n_i x 2
+  if (nrow(Phi) < 2) return(c(NA_real_, NA_real_))           # need ≥2 ages
+  if (qr(Phi)$rank < 2) return(c(NA_real_, NA_real_))        # [ADD] avoid rank deficiency
+
+
+  # LS scores for (PC1, PC2)
+  as.numeric(qr.coef(qr(Phi), y_obs - mu_obs))
+}
+###
+# =========================
+# imFunPCA: compute TEST scores + predict TEST y_hat  [ADD]
+# =========================
+imfun_pred <- test %>%
+  group_by(id) %>%
+  group_modify(~{
+    di <- arrange(.x, age)
+    sc <- get_sc_imfun(di$age, di$result_score)             # test scores (2 numbers)
+
+    if (anyNA(sc)) {
+      di$yhat_imfun <- NA_real_
+      return(di)
+    }
+
+    # predict y_hat at each observed test age using TRAIN mean+PCs
+    mu_obs <- as.numeric(eval.fd(di$age, meanfit$pc_fit))
+    B_obs  <- eval.basis(di$age, spline_basis)
+    phi1   <- as.numeric(B_obs %*% pc1s$beta)
+    phi2   <- as.numeric(B_obs %*% pc2s$beta)
+
+    di$yhat_imfun <- mu_obs + sc[1]*phi1 + sc[2]*phi2
+    di
+  }) %>%
+  ungroup()
+##### first 3 prediction on test set########
+imfun_pred_first5 <- test %>%
+  group_by(id) %>%
+  group_modify(~{
+    di <- arrange(.x, age)
+
+    if (nrow(di) < 6) {
+      di$yhat_imfun <- NA_real_
+      return(di)
+    }
+
+    sc <- get_sc_imfun(di$age[1:5], di$result_score[1:5])
+
+    mu_obs <- as.numeric(eval.fd(di$age[-(1:5)], meanfit$pc_fit))
+    B_obs  <- eval.basis(di$age[-(1:5)], spline_basis)
+    phi1   <- as.numeric(B_obs %*% pc1s$beta)
+    phi2   <- as.numeric(B_obs %*% pc2s$beta)
+
+    di$yhat_imfun <- NA_real_
+    di$yhat_imfun[-(1:5)] <- mu_obs + sc[1]*phi1 + sc[2]*phi2
+
+    di
+  }) %>%
+  ungroup()
+######################################
+imfun_list[[f]] <- imfun_pred %>% mutate(fold = f)
+imfun_list_first5[[f]] <- imfun_pred_first5 %>% mutate(fold = f)
+####
+# ==================================================
+# Compute MAE and MAD following the paper definition
+# ==================================================
+# ---- build per-row comparison data (TEST only): observed y + both predictions ----
+test_pred <- fpca_pred %>%
+  dplyr::select(id, age, y = result_score, yhat_fpca) %>%          # y = observed test score
+  dplyr::left_join(
+    imfun_pred %>% dplyr::select(id, age, yhat_imfun),             # add imFun predictions
+    by = c("id", "age")
+  ) %>%
+  filter(!is.na(yhat_fpca) & !is.na(yhat_imfun))
+####first 3############################
+test_pred_first5 <- fpca_pred_first5 %>%
+  dplyr::select(id, age, y = result_score, yhat_fpca) %>%
+  dplyr::left_join(
+    imfun_pred_first5 %>% dplyr::select(id, age, yhat_imfun),
+    by = c("id","age")
+  ) %>%
+  filter(!is.na(yhat_fpca) & !is.na(yhat_imfun))
+###################################
+# Per-athlete errors
+err_by_id <- test_pred %>%
+  group_by(id) %>%
+  summarise(
+    fpca_mae_i  = mean(abs(y - yhat_fpca),  na.rm = TRUE),
+    fpca_mad_i  = median(abs(y - yhat_fpca), na.rm = TRUE),
+    imfun_mae_i = mean(abs(y - yhat_imfun),  na.rm = TRUE),
+    imfun_mad_i = median(abs(y - yhat_imfun), na.rm = TRUE),
+    .groups = "drop"
+  )
+####first 3############
+err_by_id_first5 <- test_pred_first5 %>%
+  group_by(id) %>%
+  summarise(
+    fpca_mae_i  = mean(abs(y - yhat_fpca),  na.rm = TRUE),
+    fpca_mad_i  = median(abs(y - yhat_fpca), na.rm = TRUE),
+    imfun_mae_i = mean(abs(y - yhat_imfun),  na.rm = TRUE),
+    imfun_mad_i = median(abs(y - yhat_imfun), na.rm = TRUE),
+    .groups = "drop"
+  )
+#######################
+# Now take MEDIAN across athletes (as in paper)
+fold_res <- data.frame(
+  fold = f,
+  fpca_MAE  = median(err_by_id$fpca_mae_i,  na.rm = TRUE),
+  fpca_MAD  = median(err_by_id$fpca_mad_i,  na.rm = TRUE),
+  imfun_MAE = median(err_by_id$imfun_mae_i, na.rm = TRUE),
+  imfun_MAD = median(err_by_id$imfun_mad_i, na.rm = TRUE)
+)
+cat("fold", f, ": first5 athletes used =", nrow(err_by_id_first5), "\n")
+
+fold_res_first5 <- data.frame(
+  fold = f,
+  fpca_MAE  = median(err_by_id_first5$fpca_mae_i,  na.rm = TRUE),
+  fpca_MAD  = median(err_by_id_first5$fpca_mad_i,  na.rm = TRUE),
+  imfun_MAE = median(err_by_id_first5$imfun_mae_i, na.rm = TRUE),
+  imfun_MAD = median(err_by_id_first5$imfun_mad_i, na.rm = TRUE)
+)
+
+cv_rows_first5[[f]] <- fold_res_first5
+cv_rows[[f]] <- fold_res # [ADD] store fold results (create cv_rows <- list() before loop)
+###
+  cat("fold", f, "stored\n")
+  #####
+} #### end of loop #########
+fpca_pred_all  <- bind_rows(fpca_list)
+imfun_pred_all <- bind_rows(imfun_list)
+fpca_pred_first5_all  <- bind_rows(fpca_list_first5)
+imfun_pred_first5_all <- bind_rows(imfun_list_first5)
+###
+stopifnot(length(cv_rows) == 5,
+          length(cv_rows_first5) == 5,
+          length(fpca_list) == 5,
+          length(imfun_list) == 5,
+          length(fpca_list_first5) == 5,
+          length(imfun_list_first5) == 5)
+
+stopifnot(all(1:K_folds %in% unique(fpca_pred_all$fold)),
+          all(1:K_folds %in% unique(imfun_pred_all$fold)),
+          all(1:K_folds %in% unique(fpca_pred_first5_all$fold)),
+          all(1:K_folds %in% unique(imfun_pred_first5_all$fold)))
+###
+cv_summary <- bind_rows(cv_rows) %>%
+  dplyr::mutate(fold = as.character(fold))    # [ADD] combine folds
+####first 3##########
+cv_summary_first5 <- bind_rows(cv_rows_first5) %>%
+  mutate(fold = as.character(fold))
+
+avg_row_first5 <- cv_summary_first5 %>%
+  summarise(
+    fold = "Average",
+    fpca_MAE  = mean(fpca_MAE),
+    fpca_MAD  = mean(fpca_MAD),
+    imfun_MAE = mean(imfun_MAE),
+    imfun_MAD = mean(imfun_MAD)
+  )
+
+final_table_first5 <- bind_rows(cv_summary_first5, avg_row_first5) %>%
+  pivot_longer(cols = -fold,
+               names_to = c("Method","Metric"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = Metric, values_from = value)
+##################################
+# Add average row
+avg_row <- cv_summary %>%
+  summarise(
+    fold = "Average",
+    fpca_MAE  = mean(fpca_MAE),
+    fpca_MAD  = mean(fpca_MAD),
+    imfun_MAE = mean(imfun_MAE),
+    imfun_MAD = mean(imfun_MAD)
+  )
+
+final_table <- bind_rows(cv_summary, avg_row) %>%
+  pivot_longer(cols = -fold,
+               names_to = c("Method","Metric"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = Metric, values_from = value)
+
+final_table
+final_table_first5
+
+```
+
+```{r}
+# individual test players' aging curve (imfunPCA, first 5)
+library(dplyr)
+library(ggplot2)
+
+fold_to_plot <- 1
+
+plot_dat <- imfun_pred_first5_all %>%
+  filter(fold == fold_to_plot) %>%
+  group_by(id) %>%
+  arrange(age, .by_group = TRUE) %>%
+  mutate(
+    point_order = row_number(),
+    used_for_score = point_order <= 5,
+    predict_target = point_order > 5
+  ) %>%
+  ungroup()
+
+ggplot(plot_dat, aes(x = age, group = id)) +
+  # observed curves for all athletes
+  geom_line(aes(y = result_score), color = "black", alpha = 0.5, linewidth = 0.5) +
+  geom_point(aes(y = result_score), color = "black", alpha = 0.6, size = 1.2) +
+
+  # first 5 observed points used for score estimation
+  geom_point(
+    data = subset(plot_dat, used_for_score),
+    aes(y = result_score),
+    color = "red",
+    size = 2
+  ) +
+
+  # predicted later points only
+  geom_line(
+    data = subset(plot_dat, predict_target),
+    aes(y = yhat_imfun),
+    color = "blue",
+    alpha = 0.6,
+    linewidth = 0.5,
+    linetype = "dashed"
+  ) +
+  geom_point(
+    data = subset(plot_dat, predict_target),
+    aes(y = yhat_imfun),
+    color = "blue",
+    alpha = 0.7,
+    size = 1.2
+  ) +
+
+  labs(
+    title = paste("Fold", fold_to_plot, ": all test athletes in one plot"),
+    subtitle = "Black = observed, red = first 5 points used for score estimation, blue dashed = imFun predicted later points",
+    x = "Age",
+    y = "result_score"
+  ) +
+  theme_bw()
+#outlier
+outliers <- imfun_pred_first5_all %>%
+  filter(fold == fold_to_plot) %>%
+  filter(yhat_imfun > 2000) %>%
+  dplyr::select(id, age, yhat_imfun) %>%
+  arrange(desc(yhat_imfun))
+
+outliers
+```
+
+```{r}
+# individual test players' aging curve (FPCA, first 5)
+library(dplyr)
+library(ggplot2)
+
+fold_to_plot <- 1
+
+plot_dat <- fpca_pred_first5_all %>%
+  filter(fold == fold_to_plot) %>%
+  group_by(id) %>%
+  arrange(age, .by_group = TRUE) %>%
+  mutate(
+    point_order = row_number(),
+    used_for_score = point_order <= 5,
+    predict_target = point_order > 5
+  ) %>%
+  ungroup()
+
+ggplot(plot_dat, aes(x = age, group = id)) +
+  # observed curves for all athletes
+  geom_line(aes(y = result_score), color = "black", alpha = 0.5, linewidth = 0.5) +
+  geom_point(aes(y = result_score), color = "black", alpha = 0.6, size = 1.2) +
+
+  # first 5 observed points used for score estimation
+  geom_point(
+    data = subset(plot_dat, used_for_score),
+    aes(y = result_score),
+    color = "red",
+    size = 2
+  ) +
+
+  # predicted later points only
+  geom_line(
+    data = subset(plot_dat, predict_target),
+    aes(y = yhat_fpca),
+    color = "blue",
+    alpha = 0.6,
+    linewidth = 0.5,
+    linetype = "dashed"
+  ) +
+  geom_point(
+    data = subset(plot_dat, predict_target),
+    aes(y = yhat_fpca),
+    color = "blue",
+    alpha = 0.7,
+    size = 1.2
+  ) +
+
+  labs(
+    title = paste("Fold", fold_to_plot, ": all test athletes in one plot"),
+    subtitle = "Black = observed, red = first 5 points used for score estimation, blue dashed = FPCA predicted later points",
+    x = "Age",
+    y = "result_score"
+  ) +
+  theme_bw()
+```
+
+
+```{r}
+# plot for individual (FPCA, first 5)
+library(dplyr)
+library(ggplot2)
+
+set.seed(123)
+
+fold_to_plot <- 1
+
+# specific athlete ID
+athlete_id <- "australia/lee-troop-014178659 Marathon"
+
+# prepare data
+plot_dat <- fpca_pred_first5_all %>%
+  filter(fold == fold_to_plot, id == athlete_id) %>%
+  arrange(age) %>%
+  mutate(
+    point_order = row_number(),
+    used_for_score = point_order <= 5,
+    predict_target = point_order > 5
+  )
+
+# plot
+ggplot(plot_dat, aes(x = age)) +
+  geom_line(aes(y = result_score), color = "black", linewidth = 0.8) +
+  geom_point(aes(y = result_score), color = "black", size = 2) +
+  geom_point(
+    data = subset(plot_dat, used_for_score),
+    aes(y = result_score),
+    color = "red",
+    size = 3
+  ) +
+  geom_line(
+    data = subset(plot_dat, predict_target),
+    aes(y = yhat_fpca),
+    color = "blue",
+    linewidth = 0.8,
+    linetype = "dashed"
+  ) +
+  geom_point(
+    data = subset(plot_dat, predict_target),
+    aes(y = yhat_fpca),
+    color = "blue",
+    size = 2
+  ) +
+  labs(
+    title = paste("FPCA aging curve, fold", fold_to_plot, "- athlete ID:", athlete_id),
+    subtitle = "Black = observed, red = first 5 observed points, blue dashed = FPCA predicted later points",
+    x = "Age",
+    y = "result_score"
+  ) +
+  theme_bw()
+
+# print athlete ID
+athlete_id
+```
+
+```{r}
+# plot for individual (imfunPCA, first 5)
+library(dplyr)
+library(ggplot2)
+
+set.seed(123)
+
+fold_to_plot <- 5
+
+# specific athlete ID
+athlete_id <- "austria/peter-herzog-014748637 Marathon"
+
+# prepare data
+plot_dat <- imfun_pred_first5_all %>%
+  filter(fold == fold_to_plot, id == athlete_id) %>%
+  arrange(age) %>%
+  mutate(
+    point_order = row_number(),
+    used_for_score = point_order <= 5,
+    predict_target = point_order > 5
+  )
+
+# plot
+ggplot(plot_dat, aes(x = age)) +
+  geom_line(aes(y = result_score), color = "black", linewidth = 0.8) +
+  geom_point(aes(y = result_score), color = "black", size = 2) +
+  geom_point(
+    data = subset(plot_dat, used_for_score),
+    aes(y = result_score),
+    color = "red",
+    size = 3
+  ) +
+  geom_line(
+    data = subset(plot_dat, predict_target),
+    aes(y = yhat_imfun),
+    color = "blue",
+    linewidth = 0.8,
+    linetype = "dashed"
+  ) +
+  geom_point(
+    data = subset(plot_dat, predict_target),
+    aes(y = yhat_imfun),
+    color = "blue",
+    size = 2
+  ) +
+  labs(
+    title = paste("imfunPCA aging curve, fold", fold_to_plot, "- athlete ID:", athlete_id),
+    subtitle = "Black = observed, red = first 5 observed points, blue dashed = imfunPCA predicted later points",
+    x = "Age",
+    y = "result_score"
+  ) +
+  theme_bw()
+
+# print athlete ID
+athlete_id
+```
