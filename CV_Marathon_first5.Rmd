@@ -58,7 +58,7 @@ xalpha = lapply(1:length(observed),function(subj_index){
 
 })%>%do.call(rbind,.)
 
-sigma <<- findsigma(yem,as.matrix(xalpha),deltaem)
+sigma <- findsigma(yem,as.matrix(xalpha),deltaem)
 
 beta1 = lmcensor(yem,as.matrix(xalpha),deltaem)
 
@@ -75,53 +75,6 @@ return(list(beta=beta1,pc_fit = pc_fit))
 #install.packages("nloptr")
 library(nloptr)
 
-
-if(FALSE){
-a=3
-a2=1
-b=3
-
-
-numofcoef = 5
-numofsample=10000
-
-x1=rnorm(numofsample)
-x2=rnorm(numofsample)
-x3=rnorm(numofsample)
-x4=rnorm(numofsample)
-x5=rnorm(numofsample)
-
-y=rep(0,numofsample)
-delta=rep(0,numofsample)
-
-for(i in 1:numofsample){
-y[i]=rnorm(1,a*x1[i]+a2*x2[i]+a2*x3[i]+a2*x4[i]+a2*x5[i],3)
-if (y[i]< -1){
-	y[i]= -1
-	delta[i]=1
-}
-}
-X=cbind(x1,x2,x3,x4,x5)
-
-sigma=3
-
-
-
-
-cmat = rbind( c(1,2,0,0,0),
-					  c(3,-0.5,1,0,0)
-					)
-lmcensor(y,X,delta)
-lmcensor(y,X,delta,cmat)	
-
-
-
-
-
-}
-
-
-
 findsigma<-function(y,X,delta){
 
 sigma = sqrt( mean(lm.fit(as.matrix(X[which(delta==0),]),y[which(delta==0)])$residual^2))
@@ -129,10 +82,10 @@ return(sigma)
 }
 
 
-lmcensor<-function(y,X,delta, cmat=0){
+lmcensor <- function(y,X,delta, cmat=0){
 numofcoef  = ncol(X)
 numofsample = length(y)
-
+sigma = findsigma(y,X,delta)
 eval_f <- function(beta) {
 	temp= log(sigma^2) * numofsample / 2
 	for (i in 1:numofsample){
@@ -160,20 +113,20 @@ eval_grad_f<-function(beta){
 	if(delta[i]==1){
 	temp = temp + c(dnorm(y[i] - X[i,] %*% beta,mean=0,sd=sigma)/pnorm(y[i] - X[i,] %*% beta,mean=0,sd=sigma)) * X[i,]
 	}else if(delta[i]==0){
-	temp = temp - c(2*(y[i] - X[i,] %*% beta))/ 2 / sigma^2 * X[i,]  
+	temp = temp - c(2*(y[i] - X[i,] %*% beta))/ 2 / sigma^2 * X[i,]
 	}
 
 	}
 	return(temp)
 
 }
-					
 
-			
+
+
 eval_g_eq <- function( betax ) {
   constr <- cmat %*% betax
   grad <- cmat
-  
+
   return( list( "constraints"=constr, "jacobian"=grad ) )
 }
 
@@ -193,7 +146,7 @@ opts <- list( "algorithm" = "NLOPT_LD_AUGLAG",
               "xtol_rel" = 1.0e-7,
               "maxeval" = 1000,
               "local_opts" = local_opts)#, "print_level"= 3 ,"check_derivatives"=TRUE )
-			  
+
 
 
 if(is.vector(cmat) == FALSE && cmat != 0){
@@ -234,7 +187,7 @@ xalpha = lapply(1:length(observed),function(subj_index){
 
 })%>%do.call(rbind,.)
 
-sigma <<- findsigma(yem,as.matrix(xalpha),deltaem)
+sigma <- findsigma(yem,as.matrix(xalpha),deltaem)
 
 beta1 = lmcensor(yem,as.matrix(xalpha),deltaem)
 
@@ -944,7 +897,9 @@ cv_rows[[f]] <- fold_res # [ADD] store fold results (create cv_rows <- list() be
 ###
   cat("fold", f, "stored\n")
   #####
-} #### end of loop #########
+} 
+
+#### end of loop #########
 fpca_pred_all  <- bind_rows(fpca_list)
 imfun_pred_all <- bind_rows(imfun_list)
 fpca_pred_first5_all  <- bind_rows(fpca_list_first5)
