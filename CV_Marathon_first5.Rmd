@@ -3,6 +3,30 @@ title: "CV_Marathon_first5"
 output: html_document
 date: "2026-04-01"
 ---
+```{r}
+options(timeout = 600)
+
+dir.create("data", showWarnings = FALSE)
+
+if (!file.exists("data/data.csv")) {
+  download.file(
+    "https://github.com/LYS-999-git/Track-and-Field-aging-curves/releases/download/data/data.csv",
+    "data/data.csv",
+    mode = "wb"
+  )
+}
+
+if (!file.exists("data/olympic_results.csv")) {
+  download.file(
+    "https://github.com/LYS-999-git/Track-and-Field-aging-curves/releases/download/data/olympic_results.csv",
+    "data/olympic_results.csv",
+    mode = "wb"
+  )
+}
+
+full_data <- read.csv("data/data.csv")
+full_olympic <- read.csv("data/olympic_results.csv")
+```
 
 ```{r}
 library(dplyr)
@@ -48,8 +72,8 @@ return(list(beta=beta1,pc_fit = pc_fit))
 
 
 ```{r}
-full_data <- read.csv("~/Desktop/Stat 468 final project/data/track and field data/data.csv")
-full_olympic <- read.csv("~/Desktop/Stat 468 final project/data/track and field data/olympic_results (1).csv")
+#full_data <- read.csv("~/Desktop/Stat 468 final project/data/track and field data/data.csv")
+#full_olympic <- read.csv("~/Desktop/Stat 468 final project/data/track and field data/olympic_results (1).csv")
 Olympics_data <- full_olympic %>%
   janitor::clean_names() %>% 
   separate_wider_delim(
