@@ -149,7 +149,7 @@ opts <- list( "algorithm" = "NLOPT_LD_AUGLAG",
 
 
 
-if(is.vector(cmat) == FALSE && cmat != 0){
+if(is.vector(cmat) && any(cmat != 0)){
 res <- nloptr( x0=x0,
 eval_f=eval_f,eval_grad_f=eval_grad_f,eval_g_eq =eval_g_eq,
 opts=opts )
