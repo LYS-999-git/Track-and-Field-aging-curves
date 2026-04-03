@@ -110,10 +110,10 @@ Olympics_data <- full_olympic %>%
   
 olympic_events <- Olympics_data %>% distinct(event)
 #keep only rows in full_data_new whose discipline appears in Olympic_data
+full_data_new <- full_data %>% dplyr::select(date,results_by_year,competition,discipline,mark,result_score,athlete_id,athlete_link)
 full_data_kept <- full_data_new %>%
   semi_join(olympic_events, by = c("discipline" = "event"))
 
-full_data_new <- full_data %>% dplyr::select(date,results_by_year,competition,discipline,mark,result_score,athlete_id,athlete_link)
 
 # join full dataset with full Olympic data
 data_new_with_birthdate <- full_data_kept %>%
@@ -151,6 +151,37 @@ data_new_with_birthdate <- full_data_kept %>%
   ) %>%
   dplyr::select(-mark_raw) 
 
+# tidy dataset for FPCA
+# keep only 25 events
+disciplines_to_keep <- c(
+  "100 Metres",
+  "200 Metres",
+  "400 Metres",
+  "800 Metres",
+  "4x100 Metres Relay",
+  "4x400 Metres Relay",
+  "Race Walk Mixed Relay",
+  "1500 Metres",
+  "5000 Metres",
+  "10,000 Metres",
+  "Marathon",
+  "Triple Jump",
+  "Long Jump",
+  "High Jump",
+  "Shot Put",
+  "Discus Throw",
+  "Hammer Throw",
+  "Javelin Throw",
+  "Decathlon",
+  "Heptathlon",
+  "Pole Vault",
+  "10 Kilometres Race Walk",
+  "50 Kilometres Race Walk",
+  "20 Kilometres Race Walk",
+  "100 Metres Hurdles",
+  "110 Metres Hurdles",
+  "400 Metres Hurdles",
+  "3000 Metres Steeplechase")
 # tidy dataset for FPCA called "fd_data_full"
 fd_data_full <- data_new_with_birthdate |> 
   filter(discipline %in% disciplines_to_keep) |> 
@@ -159,7 +190,8 @@ fd_data_full <- data_new_with_birthdate |>
     age != 0,
     result_score != 0) |> 
   mutate(id = paste(athlete_link,discipline)) |> 
-  dplyr::select(id, age, result_score, gender)
+  dplyr::select(id, age, result_score, gender) 
+  
 ```
 
 
